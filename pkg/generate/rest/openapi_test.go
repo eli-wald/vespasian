@@ -1431,6 +1431,29 @@ func TestMergeJSONBodies_TypeConflictPromotesToString(t *testing.T) {
 		"conflicting types should promote to string (matching form merge behavior)")
 }
 
+// TestMergeJSONBodies_SkipBranches verifies that mergeJSONBodies correctly skips
+// nil/empty bodies and bodies that fail JSON inference, while still merging valid ones.
+func TestMergeJSONBodies_SkipBranches(t *testing.T) {
+	t.Run("skips empty body", func(t *testing.T) {
+		bodies := [][]byte{nil, []byte(`{"a":1}`)}
+		merged := mergeJSONBodies(bodies)
+		require.NotNil(t, merged, "expected non-nil result when one body is valid")
+		require.NotNil(t, merged.Value)
+		require.NotNil(t, merged.Value.Properties)
+		assert.Contains(t, merged.Value.Properties, "a", "valid body's property 'a' should be present")
+	})
+
+	t.Run("skips body that fails inference", func(t *testing.T) {
+		bodies := [][]byte{[]byte("not valid json"), []byte(`{"a":1}`)}
+		merged := mergeJSONBodies(bodies)
+		require.NotNil(t, merged, "expected non-nil result when one body is valid")
+		require.NotNil(t, merged.Value)
+		require.NotNil(t, merged.Value.Properties)
+		assert.Contains(t, merged.Value.Properties, "a", "valid body's property 'a' should be present")
+		assert.Len(t, merged.Value.Properties, 1, "only the valid body should contribute properties")
+	})
+}
+
 // TestExtractComponents_Deterministic verifies that Generate produces byte-identical
 // output across multiple runs when many paths share the same schema fingerprint.
 // Non-determinism would arise from iterating doc.Paths.Map() in random order:

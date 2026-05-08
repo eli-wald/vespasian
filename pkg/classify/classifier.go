@@ -127,7 +127,8 @@ func Deduplicate(classified []ClassifiedRequest) []ClassifiedRequest { //nolint:
 		//   - Identical bodies still collapse correctly (true duplicates).
 		//   - Empty-body requests (GET, DELETE, HEAD, OPTIONS) are unaffected.
 		if len(req.Body) > 0 {
-			if ct := getContentType(req.Headers); ct != "" {
+			ct := getContentType(req.Headers)
+			if ct != "" {
 				key += ":" + baseMediaType(ct)
 			}
 			// Append a short fingerprint of the body so distinct payload shapes
@@ -141,7 +142,7 @@ func Deduplicate(classified []ClassifiedRequest) []ClassifiedRequest { //nolint:
 			// A collision would silently merge two distinct bodies into one dedup
 			// bucket; this is no worse than pre-fix behavior and worth the simpler key.
 			fingerprintBody := req.Body
-			if ct := getContentType(req.Headers); ct != "" {
+			if ct != "" {
 				if mt, params, err := mime.ParseMediaType(ct); err == nil && mt == "multipart/form-data" {
 					if boundary := params["boundary"]; len(boundary) >= 4 {
 						// Multipart bodies contain a random boundary token (per-request) that

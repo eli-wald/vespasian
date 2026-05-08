@@ -39,6 +39,20 @@ func capitalizeFirst(s string) string {
 	return string(unicode.ToUpper(r)) + s[size:]
 }
 
+// baseMediaType returns the lowercased media type from a Content-Type value,
+// stripped of any parameters (e.g., "; boundary=..."). Returns "" on empty input.
+// Mirrors the helper in pkg/classify/classifier.go; cross-package consolidation
+// is tracked as a separate refactor (see PR description).
+func baseMediaType(ct string) string {
+	if ct == "" {
+		return ""
+	}
+	if i := strings.Index(ct, ";"); i >= 0 {
+		ct = ct[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(ct))
+}
+
 // inferQueryParamType infers the OpenAPI type from a query parameter value.
 func inferQueryParamType(value string) string {
 	if _, err := strconv.Atoi(value); err == nil {
@@ -231,9 +245,8 @@ func buildOperation(key endpointKey, group []classify.ClassifiedRequest) *openap
 			ct := getHeader(ep.Headers, "content-type")
 			baseType := "application/json"
 			if ct != "" {
-				trimmed := strings.ToLower(strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]))
-				if trimmed != "" {
-					baseType = trimmed
+				if t := baseMediaType(ct); t != "" {
+					baseType = t
 				}
 			}
 			ctGroups[baseType] = append(ctGroups[baseType], bodyObs{body: ep.Body, contentType: ct})

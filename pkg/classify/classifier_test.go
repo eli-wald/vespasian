@@ -468,7 +468,7 @@ func TestDeduplicate_KeepsDistinctBodiesByContentType(t *testing.T) {
 				Method:  "POST",
 				URL:     "https://example.com/api/submit",
 				Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=abc123"},
-				Body:    []byte(`--abc123\r\nContent-Disposition: form-data; name="key"\r\n\r\nvalue\r\n--abc123--`),
+				Body:    []byte("--abc123\r\nContent-Disposition: form-data; name=\"key\"\r\n\r\nvalue\r\n--abc123--\r\n"),
 			},
 			IsAPI: true, Confidence: 0.85, APIType: "rest",
 		},
@@ -691,6 +691,148 @@ func TestDeduplicate_MultipartShortBoundarySkipsNormalize(t *testing.T) {
 	result := Deduplicate(classified)
 	assert.Len(t, result, 2,
 		"short boundaries (<4 chars) skip normalization, so raw body hashes differ and observations must NOT dedup")
+}
+
+// TestDeduplicate_BodyWithoutContentType verifies body-fingerprint logic when
+// no Content-Type header is present. Two distinct body bytes should survive as
+// two separate entries; two identical bodies should collapse to one.
+func TestDeduplicate_BodyWithoutContentType(t *testing.T) {
+	t.Run("two distinct bodies survive", func(t *testing.T) {
+		classified := []ClassifiedRequest{
+			{
+				ObservedRequest: crawl.ObservedRequest{
+					Method: "POST",
+					URL:    "https://example.com/api/data",
+					// No Content-Type header
+					Body: []byte("foo=1&bar=2"),
+				},
+				IsAPI: true, Confidence: 0.8, APIType: "rest",
+			},
+			{
+				ObservedRequest: crawl.ObservedRequest{
+					Method: "POST",
+					URL:    "https://example.com/api/data",
+					// No Content-Type header
+					Body: []byte("baz=3&qux=4"),
+				},
+				IsAPI: true, Confidence: 0.8, APIType: "rest",
+			},
+		}
+		result := Deduplicate(classified)
+		assert.Len(t, result, 2, "two distinct bodies without Content-Type must not be merged")
+	})
+
+	t.Run("two identical bodies collapse to one", func(t *testing.T) {
+		body := []byte("same=body&data=here")
+		classified := []ClassifiedRequest{
+			{
+				ObservedRequest: crawl.ObservedRequest{
+					Method: "POST",
+					URL:    "https://example.com/api/data",
+					Body:   body,
+				},
+				IsAPI: true, Confidence: 0.8, APIType: "rest",
+			},
+			{
+				ObservedRequest: crawl.ObservedRequest{
+					Method: "POST",
+					URL:    "https://example.com/api/data",
+					Body:   body,
+				},
+				IsAPI: true, Confidence: 0.9, APIType: "rest",
+			},
+		}
+		result := Deduplicate(classified)
+		require.Len(t, result, 1, "byte-identical bodies without Content-Type must collapse to one entry")
+		assert.InDelta(t, 0.9, result[0].Confidence, 0.001, "highest confidence kept")
+	})
+}
+
+// TestGetContentType verifies case-insensitive header lookup for Content-Type.
+func TestGetContentType(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{
+			name:    "empty headers",
+			headers: map[string]string{},
+			want:    "",
+		},
+		{
+			name:    "exact case Content-Type",
+			headers: map[string]string{"Content-Type": "application/json"},
+			want:    "application/json",
+		},
+		{
+			name:    "lowercase content-type",
+			headers: map[string]string{"content-type": "application/json"},
+			want:    "application/json",
+		},
+		{
+			name:    "title-case Content-type",
+			headers: map[string]string{"Content-type": "application/json"},
+			want:    "application/json",
+		},
+		{
+			name:    "uppercase CONTENT-TYPE",
+			headers: map[string]string{"CONTENT-TYPE": "application/json"},
+			want:    "application/json",
+		},
+		{
+			name:    "absent header returns empty",
+			headers: map[string]string{"Accept": "text/html"},
+			want:    "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := getContentType(tc.headers)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestBaseMediaType verifies that baseMediaType strips parameters and lowercases.
+func TestBaseMediaType(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "empty string",
+			input: "",
+			want:  "",
+		},
+		{
+			name:  "plain application/json",
+			input: "application/json",
+			want:  "application/json",
+		},
+		{
+			name:  "with parameters application/json; charset=utf-8",
+			input: "application/json; charset=utf-8",
+			want:  "application/json",
+		},
+		{
+			name:  "lowercase normalization Application/JSON",
+			input: "Application/JSON",
+			want:  "application/json",
+		},
+		{
+			name:  "whitespace handling",
+			input: "  text/html  ; q=1",
+			want:  "text/html",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := baseMediaType(tc.input)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 // BenchmarkDeduplicate exercises the dedup hot path (key construction +

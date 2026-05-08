@@ -17,6 +17,7 @@ package rest
 import (
 	"bytes"
 	"io"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/url"
@@ -25,14 +26,14 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 )
 
-// maxMultipartParts bounds memory under adversarial input where a hostile
-// multipart body might contain millions of trivial parts. Realistic forms
-// have well below this limit.
-const maxMultipartParts = 1000
-
 const (
 	maxURLEncodedBodySize = 10 * 1024 * 1024 // 10MB; matches JSON InferSchema cap
 	maxFormFields         = 1000             // matches maxMultipartParts
+	maxMultipartBodySize  = 10 * 1024 * 1024 // 10MB; parity with urlencoded + JSON
+	// maxMultipartParts bounds memory under adversarial input where a hostile
+	// multipart body might contain millions of trivial parts. Realistic forms
+	// have well below this limit.
+	maxMultipartParts = 1000
 )
 
 // getHeader retrieves a header value case-insensitively. The exact-match
@@ -63,6 +64,7 @@ func ParseURLEncodedForm(body []byte) *openapi3.SchemaRef {
 	// same cap (schema.go:maxBodySize); aligning here so all three body parsers
 	// (JSON / urlencoded / multipart) reject obviously hostile sizes uniformly.
 	if len(body) > maxURLEncodedBodySize {
+		slog.Warn("form parser dropped urlencoded body", "reason", "body_size_exceeded", "size", len(body), "cap", maxURLEncodedBodySize)
 		return nil
 	}
 	values, err := url.ParseQuery(string(body))
@@ -73,6 +75,7 @@ func ParseURLEncodedForm(body []byte) *openapi3.SchemaRef {
 		// Defensive: don't allocate one schema property per field on adversarial
 		// bodies (millions of `k=v&` pairs). Drop on the floor to mirror
 		// multipart's maxMultipartParts behavior.
+		slog.Warn("form parser dropped urlencoded body", "reason", "field_count_exceeded", "fields", len(values), "cap", maxFormFields)
 		return nil
 	}
 	schema := openapi3.NewObjectSchema()
@@ -92,6 +95,10 @@ func ParseMultipartForm(body []byte, boundary string) *openapi3.SchemaRef {
 	if boundary == "" {
 		return nil
 	}
+	if len(body) > maxMultipartBodySize {
+		slog.Warn("form parser dropped multipart body", "reason", "body_size_exceeded", "size", len(body), "cap", maxMultipartBodySize)
+		return nil
+	}
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	schema := openapi3.NewObjectSchema()
 	partCount := 0
@@ -104,6 +111,7 @@ func ParseMultipartForm(body []byte, boundary string) *openapi3.SchemaRef {
 		if partCount > maxMultipartParts {
 			// Defensive: bound memory under adversarial input where a hostile
 			// multipart body might contain millions of trivial parts.
+			slog.Warn("form parser truncated multipart body", "reason", "parts_cap_exceeded", "cap", maxMultipartParts)
 			break
 		}
 		name := part.FormName()

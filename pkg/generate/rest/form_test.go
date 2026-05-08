@@ -124,7 +124,29 @@ func TestParseMultipartForm(t *testing.T) {
 	})
 }
 
+func TestMergeURLEncodedBodies(t *testing.T) {
+	t.Run("empty bodies slice", func(t *testing.T) {
+		result := mergeURLEncodedBodies([][]byte{})
+		assert.Nil(t, result, "empty bodies slice should return nil")
+	})
+
+	t.Run("all-empty body bytes", func(t *testing.T) {
+		result := mergeURLEncodedBodies([][]byte{nil, {}, nil})
+		assert.Nil(t, result, "all-empty body bytes should return nil")
+	})
+}
+
 func TestMergeMultipartBodies(t *testing.T) {
+	t.Run("empty bodies slice", func(t *testing.T) {
+		result := mergeMultipartBodies([][]byte{}, []string{})
+		assert.Nil(t, result, "empty bodies slice should return nil")
+	})
+
+	t.Run("all-empty body bytes", func(t *testing.T) {
+		result := mergeMultipartBodies([][]byte{nil, {}, nil}, []string{"", "", ""})
+		assert.Nil(t, result, "all-empty body bytes should return nil")
+	})
+
 	t.Run("merges properties from two observations", func(t *testing.T) {
 		var buf1 bytes.Buffer
 		w1 := multipart.NewWriter(&buf1)
@@ -620,6 +642,16 @@ func TestParseMultipartForm_BinaryFile(t *testing.T) {
 		assert.Equal(t, "string", prop.Value.Type.Slice()[0])
 		assert.Equal(t, "binary", prop.Value.Format, "file field should have format binary")
 	}
+}
+
+// TestParseMultipartForm_BodyTooLarge verifies that ParseMultipartForm rejects
+// bodies larger than maxMultipartBodySize (10 MB) and returns nil, providing
+// parity with the urlencoded and JSON parser caps (SEC-BE-002).
+func TestParseMultipartForm_BodyTooLarge(t *testing.T) {
+	body := make([]byte, maxMultipartBodySize+1)
+	// Use an arbitrary boundary — function must reject on size before parsing.
+	schema := ParseMultipartForm(body, "someboundary")
+	assert.Nil(t, schema, "expected nil for body exceeding maxMultipartBodySize, got non-nil schema")
 }
 
 // TestParseURLEncodedForm_BodyTooLarge verifies that ParseURLEncodedForm rejects

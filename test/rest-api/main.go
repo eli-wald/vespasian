@@ -658,6 +658,11 @@ func handleEmptyOK(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// SEC-FE-001: indexHTML embeds an inline <script> that fires fetch() requests on
+// page load to exercise vespasian's form-body parser during E2E crawls. This is
+// intentional and acceptable because this server is a local test fixture only —
+// it is never deployed and is not subject to CSP. Do NOT copy this pattern to
+// production.
 func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	const indexHTML = `<!DOCTYPE html>
@@ -688,12 +693,13 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
   <li>POST /api/login - URL-encoded form login</li>
   <li>POST /api/upload - Multipart file upload</li>
 </ul>
+<!-- TEST-ONLY: inline script intentionally fires fetch() to exercise vespasian's form-body parser during E2E crawls. Acceptable here because this server is a local test fixture only — never deployed and not subject to CSP. Do NOT copy this pattern to production. -->
 <script>
   // Fire urlencoded POST to /api/login on page load (for form data E2E testing)
   (function() {
     const params = new URLSearchParams();
     params.append('username', 'alice');
-    params.append('password', 'secret123');
+    params.append('password', 'testpassword');  // synthetic test value, not a real credential
     params.append('remember_me', 'true');
     fetch('/api/login', {
       method: 'POST',
