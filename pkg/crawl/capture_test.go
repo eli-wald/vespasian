@@ -16,11 +16,67 @@ package crawl
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// TestCapture_MultiValueQueryParamsRoundTrip (TEST-003) verifies that an
+// ObservedRequest with multi-value QueryParams survives a WriteCapture/ReadCapture
+// round-trip with exact value preservation.
+func TestCapture_MultiValueQueryParamsRoundTrip(t *testing.T) {
+	original := []ObservedRequest{
+		{
+			Method: "GET",
+			URL:    "https://example.com/api/items",
+			QueryParams: map[string][]string{
+				"tag": {"a", "b"},
+			},
+			Response: ObservedResponse{
+				StatusCode: 200,
+			},
+			Source: "browser",
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteCapture(&buf, original); err != nil {
+		t.Fatalf("WriteCapture failed: %v", err)
+	}
+
+	result, err := ReadCapture(&buf)
+	if err != nil {
+		t.Fatalf("ReadCapture failed: %v", err)
+	}
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(result))
+	}
+	if !reflect.DeepEqual(original[0].QueryParams, result[0].QueryParams) {
+		t.Errorf("QueryParams mismatch: want %v, got %v", original[0].QueryParams, result[0].QueryParams)
+	}
+}
+
+// TestReadCapture_RejectsLegacyShape (TEST-003) verifies that the old
+// map[string]string shape for query_params (used in versions ≤ LAB-2110)
+// produces a non-nil unmarshal error rather than silently dropping values.
+func TestReadCapture_RejectsLegacyShape(t *testing.T) {
+	// Old shape: query_params is map[string]string, not map[string][]string.
+	legacy := `[{"method":"GET","url":"http://x.test/","query_params":{"k":"v"},"response":{"status_code":200},"source":"test"}]`
+
+	var requests []ObservedRequest
+	err := json.Unmarshal([]byte(legacy), &requests)
+	if err == nil {
+		t.Fatal("expected unmarshal error for legacy map[string]string shape, got nil")
+	}
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		t.Errorf("expected *json.UnmarshalTypeError, got %T: %v", err, err)
+	}
+}
 
 func TestWriteCapture(t *testing.T) {
 	t.Run("single request serializes correctly", func(t *testing.T) {

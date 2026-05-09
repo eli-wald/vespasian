@@ -118,7 +118,18 @@ func Deduplicate(classified []ClassifiedRequest) []ClassifiedRequest {
 		existing, found := seen[key]
 		if !found {
 			order = append(order, key)
-			seen[key] = &entry{req: req}
+			// Deep-copy QueryParams so that merging into the entry does not mutate
+			// the caller's original ClassifiedRequest slices.
+			entryCopy := req
+			if req.QueryParams != nil {
+				entryCopy.QueryParams = make(map[string][]string, len(req.QueryParams))
+				for k, vs := range req.QueryParams {
+					copied := make([]string, len(vs))
+					copy(copied, vs)
+					entryCopy.QueryParams[k] = copied
+				}
+			}
+			seen[key] = &entry{req: entryCopy}
 		} else {
 			// Merge multi-value QueryParams: union per key, preserving first-seen order.
 			if req.QueryParams != nil {
@@ -146,24 +157,37 @@ func Deduplicate(classified []ClassifiedRequest) []ClassifiedRequest {
 	return results
 }
 
-// MergeUniqueOrdered appends values from b to a, skipping any value already
-// present in a. Preserves first-seen order. Returns the merged slice.
+// MergeUniqueOrdered returns a new slice containing the values of a followed
+// by the values of b, with duplicates removed. The first occurrence of each
+// distinct value wins, preserving order. Neither input slice is modified.
+//
+// This function is safe to call when a or b reference data that should not be
+// mutated (e.g., observation data passed to Deduplicate) — the returned slice
+// is always a fresh allocation.
+//
+// Returns nil when both inputs are nil (preserving the nil-identity contract
+// expected by callers that use nil as "no values seen").
 func MergeUniqueOrdered(a, b []string) []string {
-	if len(b) == 0 {
-		return a
+	if len(a) == 0 && len(b) == 0 {
+		return nil
 	}
-	seen := make(map[string]struct{}, len(a))
+	out := make([]string, 0, len(a)+len(b))
+	seen := make(map[string]struct{}, len(a)+len(b))
 	for _, v := range a {
+		if _, ok := seen[v]; ok {
+			continue
+		}
 		seen[v] = struct{}{}
+		out = append(out, v)
 	}
 	for _, v := range b {
 		if _, ok := seen[v]; ok {
 			continue
 		}
-		a = append(a, v)
 		seen[v] = struct{}{}
+		out = append(out, v)
 	}
-	return a
+	return out
 }
 
 // getSoapAction returns the SOAPAction header value, performing a case-insensitive lookup.

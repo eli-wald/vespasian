@@ -46,6 +46,11 @@ func previewBytes(payload []byte) string {
 // extractQueryParams parses query parameters from a URL string.
 // Returns nil if the URL is invalid or not absolute.
 // All values for a key are preserved (multi-value query params).
+//
+// The Scheme+Host check below is required because url.Parse is intentionally
+// lenient: it accepts relative paths (e.g. "not a url") without error, setting
+// Scheme and Host to "". Traffic imports represent real captured requests and
+// must have absolute URLs, so we reject anything without both fields.
 func extractQueryParams(urlStr string) map[string][]string {
 	parsed, err := url.Parse(urlStr)
 	if err != nil {

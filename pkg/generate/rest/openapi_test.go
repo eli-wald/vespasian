@@ -1029,6 +1029,49 @@ func TestOpenAPIGenerator_NonHTTPScheme(t *testing.T) {
 	}
 }
 
+// TestBuildOperation_EmptyValuesQueryParam is a regression test for D2: a query
+// parameter with an empty observed-values slice must be silently omitted from
+// the generated Operation. Prior to the D2 fix, buildOperation would panic
+// with an index-out-of-range accessing info.values[0] on the scalar branch.
+func TestBuildOperation_EmptyValuesQueryParam(t *testing.T) {
+	// "foo" has an empty values slice — simulates a hand-crafted capture where
+	// the param key is present but no values were ever recorded.
+	// "bar" is a normal scalar param that should still appear.
+	group := []classify.ClassifiedRequest{
+		{
+			ObservedRequest: crawl.ObservedRequest{
+				Method:      "GET",
+				URL:         "https://api.example.com/items?bar=1",
+				QueryParams: map[string][]string{"foo": {}, "bar": {"1"}},
+				Response:    crawl.ObservedResponse{StatusCode: 200},
+			},
+			IsAPI: true,
+		},
+	}
+	key := endpointKey{path: "/items", method: "get"}
+
+	// Must not panic.
+	op := buildOperation(key, group)
+
+	// "foo" must be absent — no observed values means we cannot document it.
+	for _, paramRef := range op.Parameters {
+		if paramRef.Value != nil && paramRef.Value.Name == "foo" {
+			t.Errorf("parameter 'foo' with empty values should be omitted, but was emitted")
+		}
+	}
+
+	// "bar" must still be present.
+	found := false
+	for _, paramRef := range op.Parameters {
+		if paramRef.Value != nil && paramRef.Value.Name == "bar" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("parameter 'bar' with a valid value should be emitted")
+	}
+}
+
 // TestBuildOperation_ScalarQueryParam is a regression test: a scalar query param
 // should produce a non-array parameter with no Style or Explode set.
 func TestBuildOperation_ScalarQueryParam(t *testing.T) {

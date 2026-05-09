@@ -240,10 +240,28 @@ func TestDeduplicate_MergesMultiValueQueryParams(t *testing.T) {
 		},
 	}
 
+	// TEST-001: capture a deep snapshot of each input slice BEFORE Deduplicate runs.
+	beforeSnapshots := make([]map[string][]string, len(classified))
+	for i, cr := range classified {
+		snap := make(map[string][]string, len(cr.QueryParams))
+		for k, vs := range cr.QueryParams {
+			copied := make([]string, len(vs))
+			copy(copied, vs)
+			snap[k] = copied
+		}
+		beforeSnapshots[i] = snap
+	}
+
 	result := Deduplicate(classified)
 	require.Len(t, result, 1)
 	// Union with order preservation and dedup: a, b (from first), c (new from second).
 	assert.Equal(t, []string{"a", "b", "c"}, result[0].QueryParams["tag"])
+
+	// TEST-001: assert inputs were not mutated (copy-on-write guarantee from D1).
+	for i, cr := range classified {
+		assert.Equal(t, beforeSnapshots[i], cr.QueryParams,
+			"Deduplicate must not mutate input[%d].QueryParams", i)
+	}
 }
 
 func TestMergeUniqueOrdered(t *testing.T) {
@@ -291,6 +309,21 @@ func TestMergeUniqueOrdered(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+
+	// TEST-002: pin copy-on-write contract — input a must not be modified.
+	t.Run("does not mutate input a", func(t *testing.T) {
+		a := []string{"x"}
+		b := []string{"y"}
+		result := MergeUniqueOrdered(a, b)
+		assert.Equal(t, []string{"x", "y"}, result, "result should contain both values")
+		assert.Equal(t, []string{"x"}, a, "input a must not be mutated")
+	})
+
+	// TEST-002: pin stronger dedup semantics — duplicates within a are removed.
+	t.Run("deduplicates within a", func(t *testing.T) {
+		result := MergeUniqueOrdered([]string{"a", "a", "b"}, nil)
+		assert.Equal(t, []string{"a", "b"}, result, "duplicates within a should be removed")
+	})
 }
 
 func TestDeduplicate_NoDuplicates(t *testing.T) {

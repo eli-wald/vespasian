@@ -146,7 +146,8 @@ func formsToObservedRequests(forms []discoveredForm, pageURL string) []ObservedR
 				u.RawQuery = q.Encode()
 				obs.URL = u.String()
 
-				obs.QueryParams = u.Query()
+				// q is already url.Values (map[string][]string); no need to re-parse.
+				obs.QueryParams = q
 			}
 		}
 

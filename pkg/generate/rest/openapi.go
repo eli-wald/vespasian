@@ -208,6 +208,10 @@ func buildOperation(key endpointKey, group []classify.ClassifiedRequest) *openap
 			// Required if present in all endpoints that have query params
 			required := endpointsWithParams > 0 && info.count == endpointsWithParams
 
+			if len(info.values) == 0 {
+				continue // No observed values; cannot document this parameter accurately.
+			}
+
 			var param *openapi3.Parameter
 			if info.multiValueSeen {
 				// Emit array parameter with items type, style=form, explode=true
