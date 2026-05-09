@@ -1165,6 +1165,13 @@ func TestInferQueryParamItemsType(t *testing.T) {
 		{name: "mixed string and int", values: []string{"a", "1"}, want: "string"},
 		{name: "single string", values: []string{"hello"}, want: "string"},
 		{name: "integer is also float, int wins", values: []string{"1", "2"}, want: "integer"},
+		{name: "single negative integer", values: []string{"-1"}, want: "integer"},
+		{name: "single zero", values: []string{"0"}, want: "integer"},
+		{name: "single negative float", values: []string{"-0.5"}, want: "number"},
+		{name: "single scientific notation", values: []string{"1e10"}, want: "number"},
+		{name: "single empty string", values: []string{""}, want: "string"},
+		{name: "single mixed alphanumeric", values: []string{"abc123"}, want: "string"},
+		{name: "single uppercase boolean-like", values: []string{"True"}, want: "string"},
 	}
 
 	for _, tt := range tests {
