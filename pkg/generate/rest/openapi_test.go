@@ -1204,3 +1204,32 @@ func TestInferQueryParamItemsType(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildOperation_ScalarQueryParam_OrderIndependence(t *testing.T) {
+	// Two observations of the same scalar param: int first, then float.
+	// Pre-fix: scalar branch took values[0] = "1" → emitted integer.
+	// Post-fix: inferQueryParamItemsType walks all values → emits number.
+	group := []classify.ClassifiedRequest{
+		{ObservedRequest: crawl.ObservedRequest{
+			Method: "GET", URL: "https://x.test/items?limit=1",
+			QueryParams: map[string][]string{"limit": {"1"}},
+		}},
+		{ObservedRequest: crawl.ObservedRequest{
+			Method: "GET", URL: "https://x.test/items?limit=1.5",
+			QueryParams: map[string][]string{"limit": {"1.5"}},
+		}},
+	}
+	op := buildOperation(endpointKey{path: "/items", method: "get"}, group)
+	require.NotNil(t, op)
+	require.Len(t, op.Parameters, 1)
+	p := op.Parameters[0].Value
+	require.NotNil(t, p)
+	require.NotNil(t, p.Schema)
+	require.NotNil(t, p.Schema.Value)
+	require.NotNil(t, p.Schema.Value.Type)
+	assert.Equal(t, []string{"number"}, p.Schema.Value.Type.Slice(),
+		"scalar param type must be inferred from ALL observed values, not just the first")
+	// Confirm scalar emission (not array): no Style/Explode set
+	assert.Empty(t, p.Style, "scalar param should not set Style")
+	assert.Nil(t, p.Explode, "scalar param should not set Explode")
+}

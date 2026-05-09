@@ -67,8 +67,7 @@ func TestReadCapture_RejectsLegacyShape(t *testing.T) {
 	// Old shape: query_params is map[string]string, not map[string][]string.
 	legacy := `[{"method":"GET","url":"http://x.test/","query_params":{"k":"v"},"response":{"status_code":200},"source":"test"}]`
 
-	var requests []ObservedRequest
-	err := json.Unmarshal([]byte(legacy), &requests)
+	_, err := ReadCapture(strings.NewReader(legacy))
 	if err == nil {
 		t.Fatal("expected unmarshal error for legacy map[string]string shape, got nil")
 	}

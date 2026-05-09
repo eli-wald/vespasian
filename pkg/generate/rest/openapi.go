@@ -234,8 +234,9 @@ func buildOperation(key endpointKey, group []classify.ClassifiedRequest) *openap
 					Explode:  &trueVal,
 				}
 			} else {
-				// Emit scalar parameter using first observed value
-				paramType := inferQueryParamType(info.values[0])
+				// Emit scalar parameter; walk all observed values so type
+				// inference is order-independent (e.g., "1" then "1.5" → number).
+				paramType := inferQueryParamItemsType(info.values)
 				param = &openapi3.Parameter{
 					Name:     name,
 					In:       "query",

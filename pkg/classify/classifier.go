@@ -165,8 +165,8 @@ func Deduplicate(classified []ClassifiedRequest) []ClassifiedRequest {
 // mutated (e.g., observation data passed to Deduplicate) — the returned slice
 // is always a fresh allocation.
 //
-// Returns nil when both inputs are nil (preserving the nil-identity contract
-// expected by callers that use nil as "no values seen").
+// Returns nil when both inputs are empty (treats nil and empty slices
+// interchangeably) so callers can range over the result without a nil-check.
 func MergeUniqueOrdered(a, b []string) []string {
 	if len(a) == 0 && len(b) == 0 {
 		return nil
