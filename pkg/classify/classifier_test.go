@@ -801,11 +801,15 @@ func TestDeduplicate_IdenticalBodiesCollapse(t *testing.T) {
 
 // TestDeduplicate_GETsStillCollapseByPath verifies that bodyless GETs continue
 // to deduplicate by path regardless of any header differences (unchanged behavior).
+// Inputs explicitly carry an empty MultiValueQueryKeys map to mirror what
+// RunClassifiers produces in production (classifier.go:59) — leaving it nil
+// would let buildOperation fall through to its len(vals)>1 fallback and emit
+// an array for these scalar observations (the round-6 regression).
 func TestDeduplicate_GETsStillCollapseByPath(t *testing.T) {
 	classified := []ClassifiedRequest{
-		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=1", QueryParams: map[string][]string{"page": {"1"}}}, IsAPI: true, Confidence: 0.8},
-		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=2", QueryParams: map[string][]string{"page": {"2"}}}, IsAPI: true, Confidence: 0.85},
-		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=3", QueryParams: map[string][]string{"page": {"3"}}}, IsAPI: true, Confidence: 0.75},
+		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=1", QueryParams: map[string][]string{"page": {"1"}}}, MultiValueQueryKeys: map[string]bool{}, IsAPI: true, Confidence: 0.8},
+		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=2", QueryParams: map[string][]string{"page": {"2"}}}, MultiValueQueryKeys: map[string]bool{}, IsAPI: true, Confidence: 0.85},
+		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=3", QueryParams: map[string][]string{"page": {"3"}}}, MultiValueQueryKeys: map[string]bool{}, IsAPI: true, Confidence: 0.75},
 	}
 
 	result := Deduplicate(classified)
@@ -813,6 +817,11 @@ func TestDeduplicate_GETsStillCollapseByPath(t *testing.T) {
 	assert.InDelta(t, 0.85, result[0].Confidence, 0.001, "highest confidence kept")
 	// Query params from all 3 observations should be merged via union (LAB-2110).
 	assert.Equal(t, []string{"1", "2", "3"}, result[0].QueryParams["page"])
+	// MultiValueQueryKeys is non-nil and empty after dedup — pins the
+	// invariant that buildOperation will emit SCALAR (not ARRAY) for this
+	// merged shape, matching TestBuildOperation_PostDedupScalarNotOverWidened.
+	require.NotNil(t, result[0].MultiValueQueryKeys, "MultiValueQueryKeys must be non-nil after dedup")
+	assert.Empty(t, result[0].MultiValueQueryKeys, "page was scalar in every contributing observation; merged map must remain empty")
 }
 
 // TestDeduplicate_MultipartBoundaryNormalized verifies that two logically

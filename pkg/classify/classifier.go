@@ -260,6 +260,11 @@ func MergeUniqueOrdered(a, b []string) []string {
 // If src is nil, dst is returned unchanged. If dst is nil and src is
 // non-nil, a fresh map sized to src is allocated. Used by Deduplicate to
 // union per-observation multi-value-key tracking across merged requests.
+//
+// False-valued entries in src are intentionally omitted: consumers
+// (notably buildOperation in pkg/generate/rest) treat map-absence as
+// "not multi-value", matching Go's zero-value semantics for bool, so
+// there is no need to record key=false explicitly.
 func mergeMultiValueKeys(dst, src map[string]bool) map[string]bool {
 	if src == nil {
 		return dst

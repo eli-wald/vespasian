@@ -41,8 +41,10 @@ func capitalizeFirst(s string) string {
 
 // baseMediaType returns the lowercased media type from a Content-Type value,
 // stripped of any parameters (e.g., "; boundary=..."). Returns "" on empty input.
-// Mirrors the helper in pkg/classify/classifier.go; cross-package consolidation
-// is tracked as a separate refactor (see PR description).
+// Duplicated from pkg/classify/classifier.go's baseMediaType. Cross-package
+// consolidation (e.g., into pkg/internal/mimeutil) is intentionally deferred:
+// extracting cleanly requires breaking the classify->generate import boundary
+// in a separate PR. Keep the two copies byte-identical until that refactor.
 func baseMediaType(ct string) string {
 	if ct == "" {
 		return ""
@@ -93,17 +95,11 @@ func inferQueryParamItemsType(values []string) string {
 // for multi-value/scalar query parameters uses inferQueryParamItemsType so the
 // scalar branch of buildOperation classifies a slice of observed values
 // consistently with the array branch.
+//
+// Implemented as a thin wrapper around inferQueryParamItemsType so the
+// integer/number/boolean/string precedence stays in one place.
 func inferQueryParamType(value string) string {
-	if _, err := strconv.Atoi(value); err == nil {
-		return "integer"
-	}
-	if _, err := strconv.ParseFloat(value, 64); err == nil {
-		return "number"
-	}
-	if value == "true" || value == "false" {
-		return "boolean"
-	}
-	return "string"
+	return inferQueryParamItemsType([]string{value})
 }
 
 // OpenAPIGenerator generates OpenAPI 3.0 specifications.
