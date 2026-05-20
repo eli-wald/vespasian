@@ -16,6 +16,7 @@ package classify
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -324,6 +325,88 @@ func TestMergeUniqueOrdered(t *testing.T) {
 	t.Run("deduplicates within a", func(t *testing.T) {
 		result := MergeUniqueOrdered([]string{"a", "a", "b"}, nil)
 		assert.Equal(t, []string{"a", "b"}, result, "duplicates within a should be removed")
+	})
+}
+
+// SEC-BE-001: MergeUniqueOrdered must cap output at crawl.MaxQueryParamValues
+// and return a fresh allocation when a is already at the cap so callers cannot
+// mutate the returned slice and affect the original input.
+func TestMergeUniqueOrdered_CappedBehavior(t *testing.T) {
+	// makeCapStrings returns n unique strings suitable for cap-boundary tests.
+	makeCapStrings := func(n int, prefix string) []string {
+		vs := make([]string, n)
+		for i := range n {
+			vs[i] = prefix + strings.Repeat("x", i+1)
+		}
+		return vs
+	}
+
+	t.Run("early_return_at_cap_returns_fresh_copy_of_a", func(t *testing.T) {
+		// a is exactly at the cap; b has additional values.
+		// The implementation must return a fresh copy (not a itself) so
+		// that mutating result does not affect a.
+		a := makeCapStrings(crawl.MaxQueryParamValues, "a")
+		b := []string{"extra"}
+
+		result := MergeUniqueOrdered(a, b)
+
+		// Length must equal cap — b must not be included.
+		assert.Len(t, result, crawl.MaxQueryParamValues, "result length must equal cap when a is at cap")
+		assert.NotContains(t, result, "extra", "b values must be excluded when a is at cap")
+
+		// Fresh allocation contract: mutating a[0] must not affect result[0].
+		original0 := result[0]
+		a[0] = "MUTATED"
+		assert.Equal(t, original0, result[0], "result must be a fresh allocation (mutating a must not affect result)")
+	})
+
+	t.Run("output_never_exceeds_cap", func(t *testing.T) {
+		a := makeCapStrings(200, "a")
+		b := makeCapStrings(200, "b")
+
+		result := MergeUniqueOrdered(a, b)
+
+		assert.LessOrEqual(t, len(result), crawl.MaxQueryParamValues,
+			"output length must never exceed crawl.MaxQueryParamValues")
+	})
+
+	t.Run("b_values_included_up_to_cap_when_a_under_cap", func(t *testing.T) {
+		// a has 250 unique values; b provides 7 values that push the merged
+		// slice to exactly 257. The cap is 256, so the 257th value must be
+		// dropped.
+		a := makeCapStrings(250, "a")
+		b := []string{"b_val_1", "b_val_2", "b_val_3", "b_val_4", "b_val_5", "b_val_6", "b_val_7"}
+
+		result := MergeUniqueOrdered(a, b)
+
+		assert.Equal(t, crawl.MaxQueryParamValues, len(result), "result must be exactly capped at MaxQueryParamValues")
+		assert.Contains(t, result, "b_val_6", "b_val_6 is the 256th value and must be included")
+		assert.NotContains(t, result, "b_val_7", "b_val_7 is the 257th value and must be excluded")
+	})
+
+	t.Run("b_partial_overlap_with_a", func(t *testing.T) {
+		// a has 250 unique values including "shared"; b starts with "shared"
+		// (dedup) then adds 10 new values. The cap is 256, so values after the
+		// 6th new value must be dropped.
+		a := makeCapStrings(249, "a")
+		a = append(a, "shared") // 250 total; "shared" is last
+
+		b := []string{"shared", "new1", "new2", "new3", "new4", "new5", "new6", "new7", "new8", "new9", "new10"}
+
+		result := MergeUniqueOrdered(a, b)
+
+		// "shared" already in a — dedup must not double-count it.
+		count := 0
+		for _, v := range result {
+			if v == "shared" {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count, "shared must appear exactly once in result (dedup)")
+
+		// Cap still applies: result must not exceed MaxQueryParamValues.
+		assert.LessOrEqual(t, len(result), crawl.MaxQueryParamValues,
+			"result must not exceed crawl.MaxQueryParamValues even with partial overlap")
 	})
 }
 

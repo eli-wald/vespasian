@@ -15,9 +15,13 @@
 package importer
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/praetorian-inc/vespasian/pkg/crawl"
 )
 
 func TestExtractQueryParams(t *testing.T) {
@@ -125,5 +129,31 @@ func TestExtractQueryParams(t *testing.T) {
 			got := extractQueryParams(tt.url)
 			assert.Equal(t, tt.want, got, "extractQueryParams(%q)", tt.url)
 		})
+	}
+}
+
+// SEC-BE-002: extractQueryParams must cap the number of values per key to
+// crawl.MaxQueryParamValues so that malicious import files with thousands of
+// repeated values for a single key cannot exhaust memory.
+func TestExtractQueryParams_CapsValuesPerKey(t *testing.T) {
+	// Build a URL with MaxQueryParamValues+10 distinct values for key "k".
+	var b strings.Builder
+	b.WriteString("https://example.com/api?")
+	const totalValues = crawl.MaxQueryParamValues + 10
+	for i := 0; i < totalValues; i++ {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		fmt.Fprintf(&b, "k=v%d", i)
+	}
+	urlStr := b.String()
+
+	got := extractQueryParams(urlStr)
+	if got == nil {
+		t.Fatal("extractQueryParams returned nil for a valid URL with query params")
+	}
+	if len(got["k"]) != crawl.MaxQueryParamValues {
+		t.Errorf("len(got[k]) = %d, want %d (cap must be applied per key)",
+			len(got["k"]), crawl.MaxQueryParamValues)
 	}
 }

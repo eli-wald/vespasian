@@ -174,7 +174,7 @@ func mapNetworkToObservedRequest(req *pendingRequest, pageURL string) ObservedRe
 	// Parse query parameters from URL.
 	if obs.URL != "" {
 		if u, err := url.Parse(obs.URL); err == nil {
-			obs.QueryParams = u.Query()
+			obs.QueryParams = CapQueryValues(u.Query())
 		}
 	}
 

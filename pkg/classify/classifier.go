@@ -231,20 +231,39 @@ func Deduplicate(classified []ClassifiedRequest) []ClassifiedRequest { //nolint:
 // mutated (e.g., observation data passed to Deduplicate) — the returned slice
 // is always a fresh allocation.
 //
+// The output is capped at crawl.MaxQueryParamValues entries to bound memory
+// usage when merging observations from untrusted capture files.
+//
 // Returns nil when both inputs are empty (treats nil and empty slices
 // interchangeably) so callers can range over the result without a nil-check.
 func MergeUniqueOrdered(a, b []string) []string {
 	if len(a) == 0 && len(b) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(a)+len(b))
-	seen := make(map[string]struct{}, len(a)+len(b))
+	limit := crawl.MaxQueryParamValues
+	// If a is already at or past the limit, return a truncated fresh copy
+	// and skip b entirely — the cap dominates and merging further values
+	// would just be dropped.
+	if len(a) >= limit {
+		out := make([]string, limit)
+		copy(out, a[:limit])
+		return out
+	}
+	outCapacity := len(a) + len(b)
+	if outCapacity > limit {
+		outCapacity = limit
+	}
+	out := make([]string, 0, outCapacity)
+	seen := make(map[string]struct{}, outCapacity)
 	for _, v := range a {
 		if _, ok := seen[v]; ok {
 			continue
 		}
 		seen[v] = struct{}{}
 		out = append(out, v)
+		if len(out) >= limit {
+			return out
+		}
 	}
 	for _, v := range b {
 		if _, ok := seen[v]; ok {
@@ -252,6 +271,9 @@ func MergeUniqueOrdered(a, b []string) []string {
 		}
 		seen[v] = struct{}{}
 		out = append(out, v)
+		if len(out) >= limit {
+			return out
+		}
 	}
 	return out
 }

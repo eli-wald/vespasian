@@ -134,7 +134,7 @@ func formsToObservedRequests(forms []discoveredForm, pageURL string) []ObservedR
 
 			// Parse query params from the action URL.
 			if u, err := url.Parse(f.Action); err == nil {
-				obs.QueryParams = u.Query()
+				obs.QueryParams = CapQueryValues(u.Query())
 			}
 		} else {
 			// GET form: merge fields into query params.
@@ -147,7 +147,7 @@ func formsToObservedRequests(forms []discoveredForm, pageURL string) []ObservedR
 				obs.URL = u.String()
 
 				// q is a fresh url.Values from u.Query() above; safe to assign without copy.
-				obs.QueryParams = q
+				obs.QueryParams = CapQueryValues(q)
 			}
 		}
 

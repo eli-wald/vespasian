@@ -17,10 +17,29 @@ package crawl
 import (
 	"encoding/json"
 	"io"
+	"net/url"
 )
 
 // MaxCaptureFileSize is the maximum allowed capture file size for deserialization (100 MB).
 const MaxCaptureFileSize = 100 * 1024 * 1024
+
+// MaxQueryParamValues caps the number of distinct values retained per
+// query-parameter key. Defends against ?k=v1&k=v2&...&k=vN expansion
+// attacks in untrusted capture files (Burp/HAR/mitmproxy imports). Mirrors
+// the pkg/analyze/forms.go maxFormsPerBody/maxFieldsPerForm pattern.
+const MaxQueryParamValues = 256
+
+// CapQueryValues truncates each per-key value slice in q to at most
+// MaxQueryParamValues entries, mutating q in place. Returns q for
+// call-site convenience. Excess values are dropped.
+func CapQueryValues(q url.Values) url.Values {
+	for k, vs := range q {
+		if len(vs) > MaxQueryParamValues {
+			q[k] = vs[:MaxQueryParamValues]
+		}
+	}
+	return q
+}
 
 // WriteCapture writes observed requests to a writer in JSON format.
 func WriteCapture(w io.Writer, requests []ObservedRequest) error {

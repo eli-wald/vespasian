@@ -19,10 +19,98 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// makeUniqueStrings returns a slice of n distinct strings "v", "vv", "vvv", ...
+// Shared across TestCapQueryValues subtests (Rule of Three satisfied: 6+ callers).
+func makeUniqueStrings(n int) []string {
+	vs := make([]string, n)
+	for i := range n {
+		vs[i] = strings.Repeat("v", i+1)
+	}
+	return vs
+}
+
+// TestCapQueryValues (SEC-BE-001) verifies that CapQueryValues enforces the
+// MaxQueryParamValues cap per key, mutates q in place, and handles edge cases.
+func TestCapQueryValues(t *testing.T) {
+	t.Run("under_cap_no_truncation", func(t *testing.T) {
+		q := url.Values{"k": makeUniqueStrings(10)}
+		got := CapQueryValues(q)
+		if len(got["k"]) != 10 {
+			t.Errorf("len = %d, want 10 (values under cap must not be truncated)", len(got["k"]))
+		}
+	})
+
+	t.Run("exactly_at_cap_no_truncation", func(t *testing.T) {
+		q := url.Values{"k": makeUniqueStrings(MaxQueryParamValues)}
+		got := CapQueryValues(q)
+		if len(got["k"]) != MaxQueryParamValues {
+			t.Errorf("len = %d, want %d (values exactly at cap must not be truncated)", len(got["k"]), MaxQueryParamValues)
+		}
+	})
+
+	t.Run("over_cap_truncates_to_MaxQueryParamValues", func(t *testing.T) {
+		q := url.Values{"k": makeUniqueStrings(MaxQueryParamValues + 50)}
+		got := CapQueryValues(q)
+		if len(got["k"]) != MaxQueryParamValues {
+			t.Errorf("len = %d, want %d (values over cap must be truncated)", len(got["k"]), MaxQueryParamValues)
+		}
+	})
+
+	t.Run("multiple_keys_only_over_cap_keys_truncated", func(t *testing.T) {
+		q := url.Values{
+			"under": makeUniqueStrings(10),
+			"at":    makeUniqueStrings(MaxQueryParamValues),
+			"over":  makeUniqueStrings(MaxQueryParamValues + 20),
+		}
+		CapQueryValues(q)
+		if len(q["under"]) != 10 {
+			t.Errorf("q[under] len = %d, want 10 (under-cap key must not be truncated)", len(q["under"]))
+		}
+		if len(q["at"]) != MaxQueryParamValues {
+			t.Errorf("q[at] len = %d, want %d (at-cap key must not be truncated)", len(q["at"]), MaxQueryParamValues)
+		}
+		if len(q["over"]) != MaxQueryParamValues {
+			t.Errorf("q[over] len = %d, want %d (over-cap key must be truncated)", len(q["over"]), MaxQueryParamValues)
+		}
+	})
+
+	t.Run("nil_map_returns_nil", func(t *testing.T) {
+		// ranging over a nil map is a no-op in Go; CapQueryValues must not panic.
+		got := CapQueryValues(nil)
+		if got != nil {
+			t.Errorf("got %v, want nil (nil input must return nil)", got)
+		}
+	})
+
+	t.Run("empty_map_returns_empty", func(t *testing.T) {
+		q := url.Values{}
+		got := CapQueryValues(q)
+		if len(got) != 0 {
+			t.Errorf("len = %d, want 0 (empty map must return empty)", len(got))
+		}
+	})
+
+	t.Run("mutation_in_place", func(t *testing.T) {
+		// Callers in crawler.go / network.go / forms.go rely on CapQueryValues
+		// mutating q and returning the same map -- not a copy.
+		q := url.Values{"k": makeUniqueStrings(MaxQueryParamValues + 1)}
+		got := CapQueryValues(q)
+		// Same map identity: pointer equality via reflect.
+		if reflect.ValueOf(q).Pointer() != reflect.ValueOf(got).Pointer() {
+			t.Error("CapQueryValues must return the same map it received (mutation in place)")
+		}
+		// In-place mutation: q itself was modified, not a copy.
+		if len(q["k"]) != MaxQueryParamValues {
+			t.Errorf("q[k] len = %d after CapQueryValues, want %d (in-place mutation)", len(q["k"]), MaxQueryParamValues)
+		}
+	})
+}
 
 // TestCapture_MultiValueQueryParamsRoundTrip (TEST-003) verifies that an
 // ObservedRequest with multi-value QueryParams survives a WriteCapture/ReadCapture

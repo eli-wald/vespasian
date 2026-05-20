@@ -353,7 +353,7 @@ func MapResult(r output.Result) ObservedRequest {
 	// Parse query params from URL
 	if req.URL != "" {
 		if u, err := url.Parse(req.URL); err == nil {
-			req.QueryParams = u.Query()
+			req.QueryParams = CapQueryValues(u.Query())
 		}
 	}
 

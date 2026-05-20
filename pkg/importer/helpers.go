@@ -17,6 +17,8 @@ package importer
 import (
 	"fmt"
 	"net/url"
+
+	"github.com/praetorian-inc/vespasian/pkg/crawl"
 )
 
 // maxPreviewLen caps how many bytes of an attacker-controlled string we embed
@@ -59,7 +61,7 @@ func extractQueryParams(urlStr string) map[string][]string {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil
 	}
-	queryValues := parsed.Query()
+	queryValues := crawl.CapQueryValues(parsed.Query())
 	if len(queryValues) == 0 {
 		return nil
 	}
