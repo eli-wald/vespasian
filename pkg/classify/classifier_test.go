@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
+	"github.com/praetorian-inc/vespasian/pkg/mediatype"
 )
 
 // stubClassifier is a simple classifier for testing that returns fixed values.
@@ -341,10 +342,10 @@ func TestMergeUniqueOrdered_CappedBehavior(t *testing.T) {
 		return vs
 	}
 
-	t.Run("early_return_at_cap_returns_fresh_copy_of_a", func(t *testing.T) {
-		// a is exactly at the cap; b has additional values.
-		// The implementation must return a fresh copy (not a itself) so
-		// that mutating result does not affect a.
+	t.Run("at_cap_returns_fresh_dedup_of_a", func(t *testing.T) {
+		// a is exactly at the cap with all unique values; b has additional values.
+		// After dedup a still fills the cap, so b is not included.
+		// The result must be a fresh allocation — mutating a must not affect result.
 		a := makeCapStrings(crawl.MaxQueryParamValues, "a")
 		b := []string{"extra"}
 
@@ -352,12 +353,49 @@ func TestMergeUniqueOrdered_CappedBehavior(t *testing.T) {
 
 		// Length must equal cap — b must not be included.
 		assert.Len(t, result, crawl.MaxQueryParamValues, "result length must equal cap when a is at cap")
-		assert.NotContains(t, result, "extra", "b values must be excluded when a is at cap")
+		assert.NotContains(t, result, "extra", "b values must be excluded when a fills the cap after dedup")
 
 		// Fresh allocation contract: mutating a[0] must not affect result[0].
 		original0 := result[0]
 		a[0] = "MUTATED"
 		assert.Equal(t, original0, result[0], "result must be a fresh allocation (mutating a must not affect result)")
+	})
+
+	t.Run("short_circuit_dedups_a_when_a_has_internal_duplicates", func(t *testing.T) {
+		// a has more entries than limit, but many are duplicates.
+		// After dedup, len(unique(a)) < limit, so b can contribute values.
+		// Verifies the dedup contract holds regardless of a's duplicate density.
+		limit := crawl.MaxQueryParamValues
+		// Build a with limit+50 entries but only limit/2 unique values.
+		half := limit / 2
+		a := make([]string, limit+50)
+		for i := range a {
+			a[i] = makeCapStrings(half, "a")[i%half]
+		}
+		b := makeCapStrings(20, "b")
+
+		result := MergeUniqueOrdered(a, b)
+
+		// No duplicates in result.
+		seen := make(map[string]int)
+		for _, v := range result {
+			seen[v]++
+		}
+		for v, count := range seen {
+			assert.Equal(t, 1, count, "duplicate found in result: %q appears %d times", v, count)
+		}
+		// Result must not exceed cap.
+		assert.LessOrEqual(t, len(result), limit, "result must not exceed cap")
+		// Result must contain some b values (since dedup of a left room).
+		hasBVal := false
+		for _, v := range result {
+			for _, bv := range b {
+				if v == bv {
+					hasBVal = true
+				}
+			}
+		}
+		assert.True(t, hasBVal, "b values must appear when dedup of a leaves room under cap")
 	})
 
 	t.Run("output_never_exceeds_cap", func(t *testing.T) {
@@ -1078,7 +1116,7 @@ func TestGetContentType(t *testing.T) {
 	}
 }
 
-// TestBaseMediaType verifies that baseMediaType strips parameters and lowercases.
+// TestBaseMediaType verifies that mediatype.Base strips parameters and lowercases.
 func TestBaseMediaType(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1113,7 +1151,7 @@ func TestBaseMediaType(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := baseMediaType(tc.input)
+			got := mediatype.Base(tc.input)
 			assert.Equal(t, tc.want, got)
 		})
 	}

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"reflect"
@@ -573,6 +574,70 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		// Compare - nil maps should be preserved as nil
 		if !reflect.DeepEqual(original, result) {
 			t.Errorf("Round-trip data mismatch.\nOriginal: %+v\nResult: %+v", original, result)
+		}
+	})
+}
+
+// TestCapQueryValues_KeyCap (SEC-BE-003) verifies that CapQueryValues enforces
+// the MaxQueryParamKeys cap, drops excess keys deterministically in
+// lexicographic order, and leaves the per-key value cap unchanged.
+func TestCapQueryValues_KeyCap(t *testing.T) {
+	t.Run("caps_distinct_keys_at_MaxQueryParamKeys", func(t *testing.T) {
+		q := url.Values{}
+		for i := 0; i < MaxQueryParamKeys+50; i++ {
+			key := fmt.Sprintf("key%05d", i)
+			q[key] = []string{"v"}
+		}
+		CapQueryValues(q)
+		if len(q) != MaxQueryParamKeys {
+			t.Errorf("len(q) = %d, want %d (keys over cap must be dropped)", len(q), MaxQueryParamKeys)
+		}
+	})
+
+	t.Run("key_count_cap_is_deterministic_lexicographic", func(t *testing.T) {
+		// Build two identical url.Values and verify the kept key sets are identical
+		// and are the lex-smallest MaxQueryParamKeys keys.
+		// Keys are "key00000" .. "key00561" (512+50=562 total); zero-padded so
+		// lexicographic order matches numeric order.
+		total := MaxQueryParamKeys + 50
+		makeQ := func() url.Values {
+			q := url.Values{}
+			for i := 0; i < total; i++ {
+				key := fmt.Sprintf("key%05d", i)
+				q[key] = []string{"v"}
+			}
+			return q
+		}
+
+		q1 := makeQ()
+		q2 := makeQ()
+		CapQueryValues(q1)
+		CapQueryValues(q2)
+
+		// Sets must be identical.
+		if len(q1) != len(q2) {
+			t.Fatalf("len(q1)=%d, len(q2)=%d: non-deterministic result", len(q1), len(q2))
+		}
+		for k := range q1 {
+			if _, ok := q2[k]; !ok {
+				t.Errorf("key %q present in q1 but not q2: non-deterministic", k)
+			}
+		}
+
+		// The kept keys must be the lex-smallest MaxQueryParamKeys keys.
+		// "key00000" .. "key00511" sort before "key00512" .. "key00561".
+		for i := 0; i < MaxQueryParamKeys; i++ {
+			key := fmt.Sprintf("key%05d", i)
+			if _, ok := q1[key]; !ok {
+				t.Errorf("expected lex-smallest key %q to be retained, but it was dropped", key)
+			}
+		}
+		// Keys from MaxQueryParamKeys onward must be dropped.
+		for i := MaxQueryParamKeys; i < total; i++ {
+			key := fmt.Sprintf("key%05d", i)
+			if _, ok := q1[key]; ok {
+				t.Errorf("expected key %q (past cap) to be dropped, but it was retained", key)
+			}
 		}
 	})
 }

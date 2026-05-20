@@ -459,9 +459,11 @@ func synthesizeRequest(f staticForm, baseURL string) (crawl.ObservedRequest, boo
 				q.Add(k, v)
 			}
 		}
+		// SEC-BE-001: cap values before encode so URL string matches QueryParams.
+		crawl.CapQueryValues(q)
 		u.RawQuery = q.Encode()
 		obs.URL = u.String()
-		obs.QueryParams = u.Query()
+		obs.QueryParams = q
 	} else {
 		// NOTE: Even when the form declares multipart/form-data, we URL-encode
 		// the body. The goal of ExtractForms is parameter discovery for spec
@@ -471,7 +473,8 @@ func synthesizeRequest(f staticForm, baseURL string) (crawl.ObservedRequest, boo
 		obs.Body = []byte(values.Encode())
 		// Preserve any pre-existing query in the action URL.
 		if u, err := url.Parse(resolved); err == nil {
-			obs.QueryParams = u.Query()
+			// SEC-BE-001: cap values to bound per-key memory from untrusted action URLs.
+			obs.QueryParams = crawl.CapQueryValues(u.Query())
 		}
 	}
 

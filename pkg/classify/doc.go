@@ -31,4 +31,14 @@
 // Bodyless requests still collapse by method and path. Distinct request body
 // shapes on the same endpoint+content-type survive as separate entries so
 // downstream merge logic can union their fields.
+//
+// [MergeUniqueOrdered] provides an order-preserving set-union for []string
+// slices, capped at [crawl.MaxQueryParamValues] entries; it is used by
+// [Deduplicate] to union per-key query-parameter values across duplicate
+// observations.
+//
+// The [ClassifiedRequest.MultiValueQueryKeys] field records which
+// query-parameter keys carried multiple values in a single observation,
+// allowing downstream OpenAPI generation (pkg/generate/rest) to emit
+// array-typed parameters with explode=true rather than scalar string fields.
 package classify

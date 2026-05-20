@@ -1617,3 +1617,58 @@ func TestExtractForms_DirtyEnctypeFallsBackToDefault(t *testing.T) {
 		}
 	})
 }
+
+// TestSynthesizeRequest_CapsQueryValues (SEC-BE-001) verifies that synthesizeRequest
+// applies crawl.CapQueryValues to QueryParams for both GET and POST form paths,
+// preventing unbounded memory growth from action URLs with >MaxQueryParamValues
+// values per key. Exercises the cap-rollout site in synthesizeRequest that was
+// missing before this fix.
+func TestSynthesizeRequest_CapsQueryValues(t *testing.T) {
+	// Build an action URL with MaxQueryParamValues+1 repeated values for key "x".
+	// url.Values.Encode produces "x=v&x=v&..." — parse back via url.ParseQuery.
+	overCapVals := make([]string, crawl.MaxQueryParamValues+1)
+	for i := range overCapVals {
+		overCapVals[i] = "v"
+	}
+	// Build query string with over-cap repeated key "x".
+	var sb strings.Builder
+	for i, v := range overCapVals {
+		if i > 0 {
+			sb.WriteString("&")
+		}
+		sb.WriteString("x=")
+		sb.WriteString(v)
+	}
+	overCapQS := sb.String()
+
+	t.Run("GET_form_query_params_capped", func(t *testing.T) {
+		// A GET form whose action URL carries over-cap repeated values.
+		actionURL := "https://host/search?" + overCapQS
+		body := `<form action="` + actionURL + `"><input name="q"></form>`
+		reqs := []crawl.ObservedRequest{htmlReq("https://host/page", body)}
+		got := ExtractForms(reqs)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(got))
+		}
+		if len(got[0].QueryParams["x"]) > crawl.MaxQueryParamValues {
+			t.Errorf("QueryParams[x] len = %d, want <= %d (cap not applied)",
+				len(got[0].QueryParams["x"]), crawl.MaxQueryParamValues)
+		}
+	})
+
+	t.Run("POST_form_action_query_params_capped", func(t *testing.T) {
+		// A POST form whose action URL carries over-cap repeated values.
+		// The cap applies to QueryParams derived from the action URL.
+		actionURL := "https://host/submit?" + overCapQS
+		body := `<form method="post" action="` + actionURL + `"><input name="field"></form>`
+		reqs := []crawl.ObservedRequest{htmlReq("https://host/page", body)}
+		got := ExtractForms(reqs)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(got))
+		}
+		if len(got[0].QueryParams["x"]) > crawl.MaxQueryParamValues {
+			t.Errorf("QueryParams[x] len = %d, want <= %d (cap not applied to POST action query)",
+				len(got[0].QueryParams["x"]), crawl.MaxQueryParamValues)
+		}
+	})
+}

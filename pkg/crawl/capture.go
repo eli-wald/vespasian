@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/url"
+	"sort"
 )
 
 // MaxCaptureFileSize is the maximum allowed capture file size for deserialization (100 MB).
@@ -29,13 +30,34 @@ const MaxCaptureFileSize = 100 * 1024 * 1024
 // the pkg/analyze/forms.go maxFormsPerBody/maxFieldsPerForm pattern.
 const MaxQueryParamValues = 256
 
+// MaxQueryParamKeys caps the number of distinct query-parameter keys retained
+// per observation. Defends against ?k1=v&k2=v&...&kN=v expansion attacks in
+// untrusted capture files. When the cap is exceeded, keys are kept in
+// lexicographic order to keep the result deterministic across runs. Mirrors
+// the pkg/analyze/forms.go maxFormsPerBody=1000 precedent.
+const MaxQueryParamKeys = 512
+
 // CapQueryValues truncates each per-key value slice in q to at most
-// MaxQueryParamValues entries, mutating q in place. Returns q for
-// call-site convenience. Excess values are dropped.
+// MaxQueryParamValues entries and drops excess keys beyond MaxQueryParamKeys,
+// mutating q in place. Keys are dropped in reverse-lexicographic order so the
+// kept set is deterministic across runs. Returns q for call-site convenience.
 func CapQueryValues(q url.Values) url.Values {
+	// Truncate values within each key first.
 	for k, vs := range q {
 		if len(vs) > MaxQueryParamValues {
 			q[k] = vs[:MaxQueryParamValues]
+		}
+	}
+	// Then cap the number of distinct keys deterministically.
+	if len(q) > MaxQueryParamKeys {
+		// Sort key names lexicographically and drop everything past the cap.
+		keys := make([]string, 0, len(q))
+		for k := range q {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys[MaxQueryParamKeys:] {
+			delete(q, k)
 		}
 	}
 	return q

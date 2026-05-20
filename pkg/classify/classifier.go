@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
+	"github.com/praetorian-inc/vespasian/pkg/mediatype"
 )
 
 // APIClassifier determines if a request is an API call.
@@ -142,7 +143,7 @@ func Deduplicate(classified []ClassifiedRequest) []ClassifiedRequest { //nolint:
 		if len(req.Body) > 0 {
 			ct := getContentType(req.Headers)
 			if ct != "" {
-				key += ":" + baseMediaType(ct)
+				key += ":" + mediatype.Base(ct)
 			}
 			// Append a short fingerprint of the body so distinct payload shapes
 			// on the same endpoint+method+CT survive deduplication. This is
@@ -231,8 +232,8 @@ func Deduplicate(classified []ClassifiedRequest) []ClassifiedRequest { //nolint:
 // mutated (e.g., observation data passed to Deduplicate) — the returned slice
 // is always a fresh allocation.
 //
-// The output is capped at crawl.MaxQueryParamValues entries to bound memory
-// usage when merging observations from untrusted capture files.
+// The output is capped at crawl.MaxQueryParamValues entries; duplicates are
+// removed regardless of where they appear in a or b.
 //
 // Returns nil when both inputs are empty (treats nil and empty slices
 // interchangeably) so callers can range over the result without a nil-check.
@@ -241,14 +242,6 @@ func MergeUniqueOrdered(a, b []string) []string {
 		return nil
 	}
 	limit := crawl.MaxQueryParamValues
-	// If a is already at or past the limit, return a truncated fresh copy
-	// and skip b entirely — the cap dominates and merging further values
-	// would just be dropped.
-	if len(a) >= limit {
-		out := make([]string, limit)
-		copy(out, a[:limit])
-		return out
-	}
 	outCapacity := len(a) + len(b)
 	if outCapacity > limit {
 		outCapacity = limit
@@ -320,16 +313,4 @@ func getContentType(headers map[string]string) string {
 		}
 	}
 	return ""
-}
-
-// baseMediaType returns the lowercased media type from a Content-Type value,
-// stripped of any parameters (e.g. "; boundary=..."). Returns "" on empty input.
-func baseMediaType(ct string) string {
-	if ct == "" {
-		return ""
-	}
-	if i := strings.Index(ct, ";"); i >= 0 {
-		ct = ct[:i]
-	}
-	return strings.ToLower(strings.TrimSpace(ct))
 }

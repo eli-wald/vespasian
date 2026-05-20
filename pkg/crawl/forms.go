@@ -143,11 +143,10 @@ func formsToObservedRequests(forms []discoveredForm, pageURL string) []ObservedR
 				for k, v := range f.Fields {
 					q.Set(k, v)
 				}
+				CapQueryValues(q) // mutates in place; cap before encode so URL matches QueryParams
 				u.RawQuery = q.Encode()
 				obs.URL = u.String()
-
-				// q is a fresh url.Values from u.Query() above; safe to assign without copy.
-				obs.QueryParams = CapQueryValues(q)
+				obs.QueryParams = q
 			}
 		}
 

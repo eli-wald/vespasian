@@ -28,6 +28,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/praetorian-inc/vespasian/pkg/classify"
+	"github.com/praetorian-inc/vespasian/pkg/mediatype"
 )
 
 // capitalizeFirst capitalizes the first letter of a string (UTF-8 safe).
@@ -37,22 +38,6 @@ func capitalizeFirst(s string) string {
 	}
 	r, size := utf8.DecodeRuneInString(s)
 	return string(unicode.ToUpper(r)) + s[size:]
-}
-
-// baseMediaType returns the lowercased media type from a Content-Type value,
-// stripped of any parameters (e.g., "; boundary=..."). Returns "" on empty input.
-// Duplicated from pkg/classify/classifier.go's baseMediaType. Cross-package
-// consolidation (e.g., into pkg/internal/mimeutil) is intentionally deferred:
-// extracting cleanly requires breaking the classify->generate import boundary
-// in a separate PR. Keep the two copies byte-identical until that refactor.
-func baseMediaType(ct string) string {
-	if ct == "" {
-		return ""
-	}
-	if i := strings.Index(ct, ";"); i >= 0 {
-		ct = ct[:i]
-	}
-	return strings.ToLower(strings.TrimSpace(ct))
 }
 
 // inferQueryParamItemsType infers the OpenAPI items type from a slice of
@@ -107,6 +92,11 @@ type OpenAPIGenerator struct {
 	// Format specifies the output format: "json" or "yaml" (default: "yaml")
 	Format string
 }
+
+// explodeTrue is a singleton pointer target for setting the Explode field on
+// OpenAPI Parameter objects. Hoisted to package level because the OpenAPI
+// schema model uses `*bool` for tri-state, requiring an addressable value.
+var explodeTrue = true
 
 // endpointKey groups endpoints by normalized path and HTTP method.
 type endpointKey struct {
@@ -257,7 +247,6 @@ func buildOperation(key endpointKey, group []classify.ClassifiedRequest) *openap
 			if info.multiValueSeen {
 				// Emit array parameter with items type, style=form, explode=true
 				itemsType := inferQueryParamItemsType(info.values)
-				trueVal := true
 				schema := &openapi3.Schema{
 					Type: &openapi3.Types{"array"},
 					Items: &openapi3.SchemaRef{
@@ -272,7 +261,7 @@ func buildOperation(key endpointKey, group []classify.ClassifiedRequest) *openap
 					Required: required,
 					Schema:   &openapi3.SchemaRef{Value: schema},
 					Style:    "form",
-					Explode:  &trueVal,
+					Explode:  &explodeTrue,
 				}
 			} else {
 				// Emit scalar parameter; walk all observed values so type
@@ -324,7 +313,7 @@ func buildOperation(key endpointKey, group []classify.ClassifiedRequest) *openap
 			ct := getHeader(ep.Headers, "content-type")
 			baseType := "application/json"
 			if ct != "" {
-				if t := baseMediaType(ct); t != "" {
+				if t := mediatype.Base(ct); t != "" {
 					baseType = t
 				}
 			}
