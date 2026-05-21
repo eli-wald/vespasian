@@ -16,12 +16,14 @@ package classify
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
+	"github.com/praetorian-inc/vespasian/pkg/mediatype"
 )
 
 // stubClassifier is a simple classifier for testing that returns fixed values.
@@ -155,7 +157,7 @@ func TestDeduplicate_MergesSameEndpoint(t *testing.T) {
 			ObservedRequest: crawl.ObservedRequest{
 				Method:      "GET",
 				URL:         "https://example.com/api/users?page=1",
-				QueryParams: map[string]string{"page": "1"},
+				QueryParams: map[string][]string{"page": {"1"}},
 				Response: crawl.ObservedResponse{
 					StatusCode: 200,
 					Body:       []byte(`[{"id":1}]`),
@@ -170,7 +172,7 @@ func TestDeduplicate_MergesSameEndpoint(t *testing.T) {
 			ObservedRequest: crawl.ObservedRequest{
 				Method:      "GET",
 				URL:         "https://example.com/api/users?page=2",
-				QueryParams: map[string]string{"page": "2"},
+				QueryParams: map[string][]string{"page": {"2"}},
 				Response: crawl.ObservedResponse{
 					StatusCode: 200,
 					Body:       []byte(`[{"id":2}]`),
@@ -197,7 +199,7 @@ func TestDeduplicate_MergesQueryParams(t *testing.T) {
 			ObservedRequest: crawl.ObservedRequest{
 				Method:      "GET",
 				URL:         "https://example.com/api/users?page=1",
-				QueryParams: map[string]string{"page": "1"},
+				QueryParams: map[string][]string{"page": {"1"}},
 			},
 			IsAPI:      true,
 			Confidence: 0.8,
@@ -206,7 +208,7 @@ func TestDeduplicate_MergesQueryParams(t *testing.T) {
 			ObservedRequest: crawl.ObservedRequest{
 				Method:      "GET",
 				URL:         "https://example.com/api/users?limit=10",
-				QueryParams: map[string]string{"limit": "10"},
+				QueryParams: map[string][]string{"limit": {"10"}},
 			},
 			IsAPI:      true,
 			Confidence: 0.7,
@@ -215,8 +217,235 @@ func TestDeduplicate_MergesQueryParams(t *testing.T) {
 
 	result := Deduplicate(classified)
 	require.Len(t, result, 1)
-	assert.Equal(t, "1", result[0].QueryParams["page"])
-	assert.Equal(t, "10", result[0].QueryParams["limit"])
+	assert.Equal(t, []string{"1"}, result[0].QueryParams["page"])
+	assert.Equal(t, []string{"10"}, result[0].QueryParams["limit"])
+}
+
+func TestDeduplicate_MergesMultiValueQueryParams(t *testing.T) {
+	classified := []ClassifiedRequest{
+		{
+			ObservedRequest: crawl.ObservedRequest{
+				Method:      "GET",
+				URL:         "https://example.com/api/items?tag=a&tag=b",
+				QueryParams: map[string][]string{"tag": {"a", "b"}},
+			},
+			IsAPI:      true,
+			Confidence: 0.8,
+		},
+		{
+			ObservedRequest: crawl.ObservedRequest{
+				Method:      "GET",
+				URL:         "https://example.com/api/items?tag=b&tag=c",
+				QueryParams: map[string][]string{"tag": {"b", "c"}},
+			},
+			IsAPI:      true,
+			Confidence: 0.8,
+		},
+	}
+
+	// TEST-001: capture a deep snapshot of each input slice BEFORE Deduplicate runs.
+	beforeSnapshots := make([]map[string][]string, len(classified))
+	for i, cr := range classified {
+		snap := make(map[string][]string, len(cr.QueryParams))
+		for k, vs := range cr.QueryParams {
+			copied := make([]string, len(vs))
+			copy(copied, vs)
+			snap[k] = copied
+		}
+		beforeSnapshots[i] = snap
+	}
+
+	result := Deduplicate(classified)
+	require.Len(t, result, 1)
+	// Union with order preservation and dedup: a, b (from first), c (new from second).
+	assert.Equal(t, []string{"a", "b", "c"}, result[0].QueryParams["tag"])
+
+	// TEST-001: assert inputs were not mutated (copy-on-write guarantee from D1).
+	for i, cr := range classified {
+		assert.Equal(t, beforeSnapshots[i], cr.QueryParams,
+			"Deduplicate must not mutate input[%d].QueryParams", i)
+	}
+}
+
+func TestMergeUniqueOrdered(t *testing.T) {
+	tests := []struct {
+		name string
+		a    []string
+		b    []string
+		want []string
+	}{
+		{
+			name: "both nil",
+			a:    nil,
+			b:    nil,
+			want: nil,
+		},
+		{
+			name: "a non-nil b nil",
+			a:    []string{"a"},
+			b:    nil,
+			want: []string{"a"},
+		},
+		{
+			name: "a nil b non-nil",
+			a:    nil,
+			b:    []string{"a", "b"},
+			want: []string{"a", "b"},
+		},
+		{
+			name: "merge with overlap",
+			a:    []string{"a", "b"},
+			b:    []string{"b", "c"},
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name: "b has duplicates already in a",
+			a:    []string{"a"},
+			b:    []string{"a", "a"},
+			want: []string{"a"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MergeUniqueOrdered(tt.a, tt.b)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	// TEST-002: pin copy-on-write contract — input a must not be modified.
+	t.Run("does not mutate input a", func(t *testing.T) {
+		a := []string{"x"}
+		b := []string{"y"}
+		result := MergeUniqueOrdered(a, b)
+		assert.Equal(t, []string{"x", "y"}, result, "result should contain both values")
+		assert.Equal(t, []string{"x"}, a, "input a must not be mutated")
+	})
+
+	// TEST-002: pin stronger dedup semantics — duplicates within a are removed.
+	t.Run("deduplicates within a", func(t *testing.T) {
+		result := MergeUniqueOrdered([]string{"a", "a", "b"}, nil)
+		assert.Equal(t, []string{"a", "b"}, result, "duplicates within a should be removed")
+	})
+}
+
+// SEC-BE-001: MergeUniqueOrdered must cap output at crawl.MaxQueryParamValues
+// and return a fresh allocation when a is already at the cap so callers cannot
+// mutate the returned slice and affect the original input.
+func TestMergeUniqueOrdered_CappedBehavior(t *testing.T) {
+	// makeCapStrings returns n unique strings suitable for cap-boundary tests.
+	makeCapStrings := func(n int, prefix string) []string {
+		vs := make([]string, n)
+		for i := range n {
+			vs[i] = prefix + strings.Repeat("x", i+1)
+		}
+		return vs
+	}
+
+	t.Run("at_cap_returns_fresh_dedup_of_a", func(t *testing.T) {
+		// a is exactly at the cap with all unique values; b has additional values.
+		// After dedup a still fills the cap, so b is not included.
+		// The result must be a fresh allocation — mutating a must not affect result.
+		a := makeCapStrings(crawl.MaxQueryParamValues, "a")
+		b := []string{"extra"}
+
+		result := MergeUniqueOrdered(a, b)
+
+		// Length must equal cap — b must not be included.
+		assert.Len(t, result, crawl.MaxQueryParamValues, "result length must equal cap when a is at cap")
+		assert.NotContains(t, result, "extra", "b values must be excluded when a fills the cap after dedup")
+
+		// Fresh allocation contract: mutating a[0] must not affect result[0].
+		original0 := result[0]
+		a[0] = "MUTATED"
+		assert.Equal(t, original0, result[0], "result must be a fresh allocation (mutating a must not affect result)")
+	})
+
+	t.Run("short_circuit_dedups_a_when_a_has_internal_duplicates", func(t *testing.T) {
+		// a has more entries than limit, but many are duplicates.
+		// After dedup, len(unique(a)) < limit, so b can contribute values.
+		// Verifies the dedup contract holds regardless of a's duplicate density.
+		limit := crawl.MaxQueryParamValues
+		// Build a with limit+50 entries but only limit/2 unique values.
+		half := limit / 2
+		a := make([]string, limit+50)
+		for i := range a {
+			a[i] = makeCapStrings(half, "a")[i%half]
+		}
+		b := makeCapStrings(20, "b")
+
+		result := MergeUniqueOrdered(a, b)
+
+		// No duplicates in result.
+		seen := make(map[string]int)
+		for _, v := range result {
+			seen[v]++
+		}
+		for v, count := range seen {
+			assert.Equal(t, 1, count, "duplicate found in result: %q appears %d times", v, count)
+		}
+		// Result must not exceed cap.
+		assert.LessOrEqual(t, len(result), limit, "result must not exceed cap")
+		// Result must contain some b values (since dedup of a left room).
+		hasBVal := false
+		for _, v := range result {
+			for _, bv := range b {
+				if v == bv {
+					hasBVal = true
+				}
+			}
+		}
+		assert.True(t, hasBVal, "b values must appear when dedup of a leaves room under cap")
+	})
+
+	t.Run("output_never_exceeds_cap", func(t *testing.T) {
+		a := makeCapStrings(200, "a")
+		b := makeCapStrings(200, "b")
+
+		result := MergeUniqueOrdered(a, b)
+
+		assert.LessOrEqual(t, len(result), crawl.MaxQueryParamValues,
+			"output length must never exceed crawl.MaxQueryParamValues")
+	})
+
+	t.Run("b_values_included_up_to_cap_when_a_under_cap", func(t *testing.T) {
+		// a has 250 unique values; b provides 7 values that push the merged
+		// slice to exactly 257. The cap is 256, so the 257th value must be
+		// dropped.
+		a := makeCapStrings(250, "a")
+		b := []string{"b_val_1", "b_val_2", "b_val_3", "b_val_4", "b_val_5", "b_val_6", "b_val_7"}
+
+		result := MergeUniqueOrdered(a, b)
+
+		assert.Equal(t, crawl.MaxQueryParamValues, len(result), "result must be exactly capped at MaxQueryParamValues")
+		assert.Contains(t, result, "b_val_6", "b_val_6 is the 256th value and must be included")
+		assert.NotContains(t, result, "b_val_7", "b_val_7 is the 257th value and must be excluded")
+	})
+
+	t.Run("b_partial_overlap_with_a", func(t *testing.T) {
+		// a has 250 unique values including "shared"; b starts with "shared"
+		// (dedup) then adds 10 new values. The cap is 256, so values after the
+		// 6th new value must be dropped.
+		a := makeCapStrings(249, "a")
+		a = append(a, "shared") // 250 total; "shared" is last
+
+		b := []string{"shared", "new1", "new2", "new3", "new4", "new5", "new6", "new7", "new8", "new9", "new10"}
+
+		result := MergeUniqueOrdered(a, b)
+
+		// "shared" already in a — dedup must not double-count it.
+		count := 0
+		for _, v := range result {
+			if v == "shared" {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count, "shared must appear exactly once in result (dedup)")
+
+		// Cap still applies: result must not exceed MaxQueryParamValues.
+		assert.LessOrEqual(t, len(result), crawl.MaxQueryParamValues,
+			"result must not exceed crawl.MaxQueryParamValues even with partial overlap")
+	})
 }
 
 func TestDeduplicate_NoDuplicates(t *testing.T) {
@@ -555,6 +784,90 @@ func TestRunClassifiers_WSDLWinsOverREST(t *testing.T) {
 	assert.GreaterOrEqual(t, results[0].Confidence, 0.90)
 }
 
+func TestRunClassifiers_PopulatesMultiValueQueryKeys(t *testing.T) {
+	// RunClassifiers must record which keys were observed as multi-value
+	// (len > 1) BEFORE Deduplicate can merge values across observations.
+	classifiers := []APIClassifier{&RESTClassifier{}}
+	requests := []crawl.ObservedRequest{
+		{
+			Method: "GET",
+			URL:    "https://example.com/api/items?tag=a&tag=b&page=1",
+			QueryParams: map[string][]string{
+				"tag":  {"a", "b"}, // multi-value
+				"page": {"1"},      // scalar
+			},
+			Response: crawl.ObservedResponse{StatusCode: 200, ContentType: "application/json"},
+		},
+		{
+			Method: "GET",
+			URL:    "https://example.com/api/items?page=2",
+			QueryParams: map[string][]string{
+				"page": {"2"}, // scalar
+			},
+			Response: crawl.ObservedResponse{StatusCode: 200, ContentType: "application/json"},
+		},
+	}
+	results := RunClassifiers(classifiers, requests, 0.5)
+	require.Len(t, results, 2)
+
+	// First request: tag multi-value, page scalar.
+	require.NotNil(t, results[0].MultiValueQueryKeys, "MultiValueQueryKeys must always be non-nil after RunClassifiers")
+	assert.True(t, results[0].MultiValueQueryKeys["tag"], "tag was observed as multi-value")
+	assert.False(t, results[0].MultiValueQueryKeys["page"], "page was scalar in obs 1")
+
+	// Second request: page scalar, no multi-value keys.
+	require.NotNil(t, results[1].MultiValueQueryKeys, "MultiValueQueryKeys must always be non-nil after RunClassifiers")
+	assert.Empty(t, results[1].MultiValueQueryKeys, "no key was multi-value in obs 2")
+}
+
+func TestDeduplicate_UnionsMultiValueQueryKeys(t *testing.T) {
+	// Regression: Deduplicate merges QueryParams via union, which makes
+	// the merged slice len > 1 even when each contributing observation
+	// was scalar. MultiValueQueryKeys must carry the per-observation
+	// truth through dedup so downstream consumers (OpenAPI generator)
+	// can tell "actually multi-value" from "scalar with different values
+	// across observations".
+	classified := []ClassifiedRequest{
+		{
+			ObservedRequest: crawl.ObservedRequest{
+				Method:      "GET",
+				URL:         "https://x.test/items?page=1",
+				QueryParams: map[string][]string{"page": {"1"}},
+			},
+			MultiValueQueryKeys: map[string]bool{}, // page scalar
+		},
+		{
+			ObservedRequest: crawl.ObservedRequest{
+				Method:      "GET",
+				URL:         "https://x.test/items?page=2",
+				QueryParams: map[string][]string{"page": {"2"}},
+			},
+			MultiValueQueryKeys: map[string]bool{}, // page scalar
+		},
+		{
+			ObservedRequest: crawl.ObservedRequest{
+				Method:      "GET",
+				URL:         "https://x.test/items?tag=a&tag=b",
+				QueryParams: map[string][]string{"tag": {"a", "b"}},
+			},
+			MultiValueQueryKeys: map[string]bool{"tag": true},
+		},
+	}
+	result := Deduplicate(classified)
+	require.Len(t, result, 1, "all three observations dedup to one GET:/items")
+
+	// Merged QueryParams: page=[1,2], tag=[a,b].
+	assert.Equal(t, []string{"1", "2"}, result[0].QueryParams["page"])
+	assert.Equal(t, []string{"a", "b"}, result[0].QueryParams["tag"])
+
+	// Critical: MultiValueQueryKeys must reflect per-observation truth.
+	require.NotNil(t, result[0].MultiValueQueryKeys)
+	assert.False(t, result[0].MultiValueQueryKeys["page"],
+		"page was scalar in every contributing observation; dedup must NOT mark it multi-value")
+	assert.True(t, result[0].MultiValueQueryKeys["tag"],
+		"tag was multi-value in obs 3; dedup must preserve that bit")
+}
+
 // TestDeduplicate_DistinctBodiesSurvive verifies that form-encoded POST observations
 // with distinct body bytes survive deduplication as separate entries, enabling
 // downstream buildOperation to union fields across observations (LAB-2106).
@@ -609,18 +922,27 @@ func TestDeduplicate_IdenticalBodiesCollapse(t *testing.T) {
 
 // TestDeduplicate_GETsStillCollapseByPath verifies that bodyless GETs continue
 // to deduplicate by path regardless of any header differences (unchanged behavior).
+// Inputs explicitly carry an empty MultiValueQueryKeys map to mirror what
+// RunClassifiers produces in production (classifier.go:59) — leaving it nil
+// would let buildOperation fall through to its len(vals)>1 fallback and emit
+// an array for these scalar observations (the round-6 regression).
 func TestDeduplicate_GETsStillCollapseByPath(t *testing.T) {
 	classified := []ClassifiedRequest{
-		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=1", QueryParams: map[string]string{"page": "1"}}, IsAPI: true, Confidence: 0.8},
-		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=2", QueryParams: map[string]string{"page": "2"}}, IsAPI: true, Confidence: 0.85},
-		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=3", QueryParams: map[string]string{"page": "3"}}, IsAPI: true, Confidence: 0.75},
+		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=1", QueryParams: map[string][]string{"page": {"1"}}}, MultiValueQueryKeys: map[string]bool{}, IsAPI: true, Confidence: 0.8},
+		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=2", QueryParams: map[string][]string{"page": {"2"}}}, MultiValueQueryKeys: map[string]bool{}, IsAPI: true, Confidence: 0.85},
+		{ObservedRequest: crawl.ObservedRequest{Method: "GET", URL: "https://example.com/api/products?page=3", QueryParams: map[string][]string{"page": {"3"}}}, MultiValueQueryKeys: map[string]bool{}, IsAPI: true, Confidence: 0.75},
 	}
 
 	result := Deduplicate(classified)
 	require.Len(t, result, 1, "bodyless GETs must still collapse by path")
 	assert.InDelta(t, 0.85, result[0].Confidence, 0.001, "highest confidence kept")
-	// Query params from all 3 observations should be merged.
-	assert.Equal(t, "1", result[0].QueryParams["page"])
+	// Query params from all 3 observations should be merged via union (LAB-2110).
+	assert.Equal(t, []string{"1", "2", "3"}, result[0].QueryParams["page"])
+	// MultiValueQueryKeys is non-nil and empty after dedup — pins the
+	// invariant that buildOperation will emit SCALAR (not ARRAY) for this
+	// merged shape, matching TestBuildOperation_PostDedupScalarNotOverWidened.
+	require.NotNil(t, result[0].MultiValueQueryKeys, "MultiValueQueryKeys must be non-nil after dedup")
+	assert.Empty(t, result[0].MultiValueQueryKeys, "page was scalar in every contributing observation; merged map must remain empty")
 }
 
 // TestDeduplicate_MultipartBoundaryNormalized verifies that two logically
@@ -794,7 +1116,7 @@ func TestGetContentType(t *testing.T) {
 	}
 }
 
-// TestBaseMediaType verifies that baseMediaType strips parameters and lowercases.
+// TestBaseMediaType verifies that mediatype.Base strips parameters and lowercases.
 func TestBaseMediaType(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -829,7 +1151,7 @@ func TestBaseMediaType(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := baseMediaType(tc.input)
+			got := mediatype.Base(tc.input)
 			assert.Equal(t, tc.want, got)
 		})
 	}

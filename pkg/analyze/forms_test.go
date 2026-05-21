@@ -15,6 +15,7 @@
 package analyze
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
@@ -269,12 +270,12 @@ func TestExtractForms_SelectAndTextareaExtracted(t *testing.T) {
 	}
 	// TEST-004: assert values, not just key presence.
 	// select with no value attribute -> option text content ("US").
-	if got[0].QueryParams["country"] != "US" {
-		t.Errorf("QueryParams[country] = %q, want US", got[0].QueryParams["country"])
+	if len(got[0].QueryParams["country"]) != 1 || got[0].QueryParams["country"][0] != "US" {
+		t.Errorf("QueryParams[country] = %v, want [US]", got[0].QueryParams["country"])
 	}
 	// textarea with empty content -> empty string.
-	if got[0].QueryParams["bio"] != "" {
-		t.Errorf("QueryParams[bio] = %q, want empty string", got[0].QueryParams["bio"])
+	if len(got[0].QueryParams["bio"]) != 1 || got[0].QueryParams["bio"][0] != "" {
+		t.Errorf("QueryParams[bio] = %v, want [\"\"]", got[0].QueryParams["bio"])
 	}
 }
 
@@ -439,8 +440,8 @@ func TestExtractForms_ValueFallbackPlaceholder(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(got))
 	}
-	if got[0].QueryParams["q"] != "search" {
-		t.Errorf("QueryParams[q] = %q, want search", got[0].QueryParams["q"])
+	if len(got[0].QueryParams["q"]) != 1 || got[0].QueryParams["q"][0] != "search" {
+		t.Errorf("QueryParams[q] = %v, want [search]", got[0].QueryParams["q"])
 	}
 }
 
@@ -786,11 +787,11 @@ func TestExtractForms_GetMergesActionQueryString(t *testing.T) {
 		t.Fatalf("expected 1 result, got %d", len(got))
 	}
 	r := got[0]
-	if r.QueryParams["lang"] != "en" {
-		t.Errorf("QueryParams[lang] = %q, want en", r.QueryParams["lang"])
+	if len(r.QueryParams["lang"]) != 1 || r.QueryParams["lang"][0] != "en" {
+		t.Errorf("QueryParams[lang] = %v, want [en]", r.QueryParams["lang"])
 	}
-	if r.QueryParams["q"] != "foo" {
-		t.Errorf("QueryParams[q] = %q, want foo", r.QueryParams["q"])
+	if len(r.QueryParams["q"]) != 1 || r.QueryParams["q"][0] != "foo" {
+		t.Errorf("QueryParams[q] = %v, want [foo]", r.QueryParams["q"])
 	}
 	if !strings.Contains(r.URL, "lang=en") {
 		t.Errorf("URL missing lang=en; got %q", r.URL)
@@ -807,8 +808,8 @@ func TestExtractForms_GetFormFieldOverridesActionQueryDuplicate(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(got))
 	}
-	if got[0].QueryParams["q"] != "new" {
-		t.Errorf("QueryParams[q] = %q, want new (form field should win)", got[0].QueryParams["q"])
+	if len(got[0].QueryParams["q"]) != 1 || got[0].QueryParams["q"][0] != "new" {
+		t.Errorf("QueryParams[q] = %v, want [new] (form field should win)", got[0].QueryParams["q"])
 	}
 }
 
@@ -823,8 +824,8 @@ func TestExtractForms_PostPreservesActionQueryString(t *testing.T) {
 	if !strings.Contains(r.URL, "ref=home") {
 		t.Errorf("URL missing ref=home; got %q", r.URL)
 	}
-	if r.QueryParams["ref"] != "home" {
-		t.Errorf("QueryParams[ref] = %q, want home", r.QueryParams["ref"])
+	if len(r.QueryParams["ref"]) != 1 || r.QueryParams["ref"][0] != "home" {
+		t.Errorf("QueryParams[ref] = %v, want [home]", r.QueryParams["ref"])
 	}
 	bodyStr := string(r.Body)
 	if !strings.Contains(bodyStr, "user=alice") {
@@ -911,8 +912,8 @@ func TestExtractForms_TextareaValueInGETQuery(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(got))
 	}
-	if got[0].QueryParams["msg"] != "hello world" {
-		t.Errorf("QueryParams[msg] = %q, want \"hello world\"", got[0].QueryParams["msg"])
+	if len(got[0].QueryParams["msg"]) != 1 || got[0].QueryParams["msg"][0] != "hello world" {
+		t.Errorf("QueryParams[msg] = %v, want [\"hello world\"]", got[0].QueryParams["msg"])
 	}
 	if !strings.Contains(got[0].URL, "msg=hello+world") && !strings.Contains(got[0].URL, "msg=hello%20world") {
 		t.Errorf("URL missing msg value; got %q", got[0].URL)
@@ -1614,6 +1615,137 @@ func TestExtractForms_DirtyEnctypeFallsBackToDefault(t *testing.T) {
 		ct := got[0].Headers["content-type"]
 		if ct != "multipart/form-data" {
 			t.Errorf("content-type = %q, want multipart/form-data (lowercased)", ct)
+		}
+	})
+}
+
+// TestSynthesizeRequest_CapsQueryValues (SEC-BE-001) verifies that synthesizeRequest
+// applies crawl.CapQueryValues to QueryParams for both GET and POST form paths,
+// preventing unbounded memory growth from action URLs with >MaxQueryParamValues
+// values per key. Exercises the cap-rollout site in synthesizeRequest that was
+// missing before this fix.
+func TestSynthesizeRequest_CapsQueryValues(t *testing.T) {
+	// Build an action URL with MaxQueryParamValues+1 repeated values for key "x".
+	// url.Values.Encode produces "x=v&x=v&..." — parse back via url.ParseQuery.
+	overCapVals := make([]string, crawl.MaxQueryParamValues+1)
+	for i := range overCapVals {
+		overCapVals[i] = "v"
+	}
+	// Build query string with over-cap repeated key "x".
+	var sb strings.Builder
+	for i, v := range overCapVals {
+		if i > 0 {
+			sb.WriteString("&")
+		}
+		sb.WriteString("x=")
+		sb.WriteString(v)
+	}
+	overCapQS := sb.String()
+
+	t.Run("GET_form_query_params_capped", func(t *testing.T) {
+		// A GET form whose action URL carries over-cap repeated values.
+		actionURL := "https://host/search?" + overCapQS
+		body := `<form action="` + actionURL + `"><input name="q"></form>`
+		reqs := []crawl.ObservedRequest{htmlReq("https://host/page", body)}
+		got := ExtractForms(reqs)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(got))
+		}
+		if len(got[0].QueryParams["x"]) != crawl.MaxQueryParamValues {
+			t.Errorf("QueryParams[x] len = %d, want == %d (cap must be applied exactly)",
+				len(got[0].QueryParams["x"]), crawl.MaxQueryParamValues)
+		}
+		// TEST-002: pin cap-before-encode ordering — URL string must reflect capped values too.
+		parsedURL, err := url.Parse(got[0].URL)
+		if err != nil {
+			t.Fatalf("obs.URL is unparseable: %v", err)
+		}
+		if got, want := len(parsedURL.Query()["x"]), crawl.MaxQueryParamValues; got != want {
+			t.Errorf(`obs.URL Query["x"] len = %d, want %d (cap must be applied before encode so URL matches QueryParams)`, got, want)
+		}
+	})
+
+	t.Run("POST_form_action_query_params_capped", func(t *testing.T) {
+		// A POST form whose action URL carries over-cap repeated values.
+		// The cap applies to QueryParams derived from the action URL.
+		actionURL := "https://host/submit?" + overCapQS
+		body := `<form method="post" action="` + actionURL + `"><input name="field"></form>`
+		reqs := []crawl.ObservedRequest{htmlReq("https://host/page", body)}
+		got := ExtractForms(reqs)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(got))
+		}
+		if len(got[0].QueryParams["x"]) != crawl.MaxQueryParamValues {
+			t.Errorf("QueryParams[x] len = %d, want == %d (cap must be applied exactly to POST action query)",
+				len(got[0].QueryParams["x"]), crawl.MaxQueryParamValues)
+		}
+	})
+}
+
+// TEST-001: TestSynthesizeRequest_CapsQueryKeys verifies that synthesizeRequest
+// applies crawl.CapQueryValues to cap the number of distinct query-parameter keys
+// per observation, preventing unbounded memory growth from action URLs with
+// >MaxQueryParamKeys distinct keys. Mirrors TestSynthesizeRequest_CapsQueryValues.
+//
+// Key names use the a%03d format (e.g. a000, a001, ..., a561) so that all
+// MaxQueryParamKeys+50 entries fit within maxAttrValueBytes (4096) while keeping
+// lexicographic order identical to numeric order.
+func TestSynthesizeRequest_CapsQueryKeys(t *testing.T) {
+	// Build an action URL with MaxQueryParamKeys+50 distinct keys, each with one value.
+	// Use a%03d names so they sort lexicographically: a000, a001, ..., a561.
+	total := crawl.MaxQueryParamKeys + 50
+	var sb strings.Builder
+	for i := 0; i < total; i++ {
+		if i > 0 {
+			sb.WriteString("&")
+		}
+		fmt.Fprintf(&sb, "a%03d=v", i)
+	}
+	overCapQS := sb.String()
+
+	t.Run("GET_form_key_count_capped", func(t *testing.T) {
+		// A GET form whose action URL carries over-cap distinct keys.
+		actionURL := "https://host/search?" + overCapQS
+		body := `<form action="` + actionURL + `"><input name="extra"></form>`
+		reqs := []crawl.ObservedRequest{htmlReq("https://host/page", body)}
+		got := ExtractForms(reqs)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(got))
+		}
+		if len(got[0].QueryParams) != crawl.MaxQueryParamKeys {
+			t.Errorf("QueryParams key count = %d, want %d (MaxQueryParamKeys cap not applied)",
+				len(got[0].QueryParams), crawl.MaxQueryParamKeys)
+		}
+		// The kept keys must be the lex-smallest MaxQueryParamKeys keys
+		// (a000..a511 in this case — proving lex-determinism).
+		for i := 0; i < crawl.MaxQueryParamKeys; i++ {
+			key := fmt.Sprintf("a%03d", i)
+			if _, ok := got[0].QueryParams[key]; !ok {
+				t.Errorf("expected lex-smallest key %q to be retained, but it was dropped", key)
+			}
+		}
+	})
+
+	t.Run("POST_form_key_count_capped", func(t *testing.T) {
+		// A POST form whose action URL carries over-cap distinct keys.
+		// The cap applies to QueryParams derived from the action URL.
+		actionURL := "https://host/submit?" + overCapQS
+		body := `<form method="post" action="` + actionURL + `"><input name="field"></form>`
+		reqs := []crawl.ObservedRequest{htmlReq("https://host/page", body)}
+		got := ExtractForms(reqs)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(got))
+		}
+		if len(got[0].QueryParams) != crawl.MaxQueryParamKeys {
+			t.Errorf("QueryParams key count = %d, want %d (MaxQueryParamKeys cap not applied to POST action query)",
+				len(got[0].QueryParams), crawl.MaxQueryParamKeys)
+		}
+		// The kept keys must be the lex-smallest MaxQueryParamKeys keys.
+		for i := 0; i < crawl.MaxQueryParamKeys; i++ {
+			key := fmt.Sprintf("a%03d", i)
+			if _, ok := got[0].QueryParams[key]; !ok {
+				t.Errorf("expected lex-smallest key %q to be retained, but it was dropped", key)
+			}
 		}
 	})
 }
