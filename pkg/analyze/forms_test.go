@@ -15,6 +15,7 @@
 package analyze
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
@@ -1650,9 +1651,17 @@ func TestSynthesizeRequest_CapsQueryValues(t *testing.T) {
 		if len(got) != 1 {
 			t.Fatalf("expected 1 result, got %d", len(got))
 		}
-		if len(got[0].QueryParams["x"]) > crawl.MaxQueryParamValues {
-			t.Errorf("QueryParams[x] len = %d, want <= %d (cap not applied)",
+		if len(got[0].QueryParams["x"]) != crawl.MaxQueryParamValues {
+			t.Errorf("QueryParams[x] len = %d, want == %d (cap must be applied exactly)",
 				len(got[0].QueryParams["x"]), crawl.MaxQueryParamValues)
+		}
+		// TEST-002: pin cap-before-encode ordering — URL string must reflect capped values too.
+		parsedURL, err := url.Parse(got[0].URL)
+		if err != nil {
+			t.Fatalf("obs.URL is unparseable: %v", err)
+		}
+		if got, want := len(parsedURL.Query()["x"]), crawl.MaxQueryParamValues; got != want {
+			t.Errorf(`obs.URL Query["x"] len = %d, want %d (cap must be applied before encode so URL matches QueryParams)`, got, want)
 		}
 	})
 
@@ -1666,9 +1675,77 @@ func TestSynthesizeRequest_CapsQueryValues(t *testing.T) {
 		if len(got) != 1 {
 			t.Fatalf("expected 1 result, got %d", len(got))
 		}
-		if len(got[0].QueryParams["x"]) > crawl.MaxQueryParamValues {
-			t.Errorf("QueryParams[x] len = %d, want <= %d (cap not applied to POST action query)",
+		if len(got[0].QueryParams["x"]) != crawl.MaxQueryParamValues {
+			t.Errorf("QueryParams[x] len = %d, want == %d (cap must be applied exactly to POST action query)",
 				len(got[0].QueryParams["x"]), crawl.MaxQueryParamValues)
+		}
+	})
+}
+
+// TEST-001: TestSynthesizeRequest_CapsQueryKeys verifies that synthesizeRequest
+// applies crawl.CapQueryValues to cap the number of distinct query-parameter keys
+// per observation, preventing unbounded memory growth from action URLs with
+// >MaxQueryParamKeys distinct keys. Mirrors TestSynthesizeRequest_CapsQueryValues.
+//
+// Key names use the a%03d format (e.g. a000, a001, ..., a561) so that all
+// MaxQueryParamKeys+50 entries fit within maxAttrValueBytes (4096) while keeping
+// lexicographic order identical to numeric order.
+func TestSynthesizeRequest_CapsQueryKeys(t *testing.T) {
+	// Build an action URL with MaxQueryParamKeys+50 distinct keys, each with one value.
+	// Use a%03d names so they sort lexicographically: a000, a001, ..., a561.
+	total := crawl.MaxQueryParamKeys + 50
+	var sb strings.Builder
+	for i := 0; i < total; i++ {
+		if i > 0 {
+			sb.WriteString("&")
+		}
+		fmt.Fprintf(&sb, "a%03d=v", i)
+	}
+	overCapQS := sb.String()
+
+	t.Run("GET_form_key_count_capped", func(t *testing.T) {
+		// A GET form whose action URL carries over-cap distinct keys.
+		actionURL := "https://host/search?" + overCapQS
+		body := `<form action="` + actionURL + `"><input name="extra"></form>`
+		reqs := []crawl.ObservedRequest{htmlReq("https://host/page", body)}
+		got := ExtractForms(reqs)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(got))
+		}
+		if len(got[0].QueryParams) != crawl.MaxQueryParamKeys {
+			t.Errorf("QueryParams key count = %d, want %d (MaxQueryParamKeys cap not applied)",
+				len(got[0].QueryParams), crawl.MaxQueryParamKeys)
+		}
+		// The kept keys must be the lex-smallest MaxQueryParamKeys keys
+		// (a000..a511 in this case — proving lex-determinism).
+		for i := 0; i < crawl.MaxQueryParamKeys; i++ {
+			key := fmt.Sprintf("a%03d", i)
+			if _, ok := got[0].QueryParams[key]; !ok {
+				t.Errorf("expected lex-smallest key %q to be retained, but it was dropped", key)
+			}
+		}
+	})
+
+	t.Run("POST_form_key_count_capped", func(t *testing.T) {
+		// A POST form whose action URL carries over-cap distinct keys.
+		// The cap applies to QueryParams derived from the action URL.
+		actionURL := "https://host/submit?" + overCapQS
+		body := `<form method="post" action="` + actionURL + `"><input name="field"></form>`
+		reqs := []crawl.ObservedRequest{htmlReq("https://host/page", body)}
+		got := ExtractForms(reqs)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(got))
+		}
+		if len(got[0].QueryParams) != crawl.MaxQueryParamKeys {
+			t.Errorf("QueryParams key count = %d, want %d (MaxQueryParamKeys cap not applied to POST action query)",
+				len(got[0].QueryParams), crawl.MaxQueryParamKeys)
+		}
+		// The kept keys must be the lex-smallest MaxQueryParamKeys keys.
+		for i := 0; i < crawl.MaxQueryParamKeys; i++ {
+			key := fmt.Sprintf("a%03d", i)
+			if _, ok := got[0].QueryParams[key]; !ok {
+				t.Errorf("expected lex-smallest key %q to be retained, but it was dropped", key)
+			}
 		}
 	})
 }

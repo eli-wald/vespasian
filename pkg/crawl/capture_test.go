@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -614,14 +615,20 @@ func TestCapQueryValues_KeyCap(t *testing.T) {
 		CapQueryValues(q1)
 		CapQueryValues(q2)
 
-		// Sets must be identical.
-		if len(q1) != len(q2) {
-			t.Fatalf("len(q1)=%d, len(q2)=%d: non-deterministic result", len(q1), len(q2))
-		}
+		// TEST-004: direct two-set equality via sorted slices — self-contained, no
+		// implicit dependency on a preceding length check.
+		keys1 := make([]string, 0, len(q1))
 		for k := range q1 {
-			if _, ok := q2[k]; !ok {
-				t.Errorf("key %q present in q1 but not q2: non-deterministic", k)
-			}
+			keys1 = append(keys1, k)
+		}
+		sort.Strings(keys1)
+		keys2 := make([]string, 0, len(q2))
+		for k := range q2 {
+			keys2 = append(keys2, k)
+		}
+		sort.Strings(keys2)
+		if !reflect.DeepEqual(keys1, keys2) {
+			t.Errorf("determinism failed: run1 kept %v, run2 kept %v", keys1, keys2)
 		}
 
 		// The kept keys must be the lex-smallest MaxQueryParamKeys keys.

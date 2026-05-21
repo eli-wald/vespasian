@@ -39,8 +39,11 @@ const MaxQueryParamKeys = 512
 
 // CapQueryValues truncates each per-key value slice in q to at most
 // MaxQueryParamValues entries and drops excess keys beyond MaxQueryParamKeys,
-// mutating q in place. Keys are dropped in reverse-lexicographic order so the
-// kept set is deterministic across runs. Returns q for call-site convenience.
+// mutating q in place. Returns q for call-site convenience.
+//
+// When the cap is exceeded, the lex-smallest MaxQueryParamKeys keys are
+// retained (deterministic across runs); the lex-largest excess keys are
+// dropped. Excess values are also dropped silently.
 func CapQueryValues(q url.Values) url.Values {
 	// Truncate values within each key first.
 	for k, vs := range q {
