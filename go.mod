@@ -7,6 +7,7 @@ require (
 	github.com/alecthomas/kong v1.15.0
 	github.com/getkin/kin-openapi v0.138.0
 	github.com/go-rod/rod v0.116.2
+	github.com/praetorian-inc/capability-sdk v0.0.0-20260521173605-4b0d5a7320ae
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/katana v1.6.1
 	github.com/stretchr/testify v1.11.1
