@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/praetorian-inc/vespasian/internal/pipeline"
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
 )
 
@@ -270,14 +271,14 @@ func TestParseHeaders_Multiple(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsStaticAssetURL_CSS(t *testing.T) {
-	assert.True(t, isStaticAssetURL("https://example.com/styles/main.css"))
+	assert.True(t, pipeline.IsStaticAssetURL("https://example.com/styles/main.css"))
 }
 
 func TestIsStaticAssetURL_HTML(t *testing.T) {
-	assert.False(t, isStaticAssetURL("https://example.com/index.html"))
+	assert.False(t, pipeline.IsStaticAssetURL("https://example.com/index.html"))
 }
 
 func TestIsStaticAssetURL_QueryStringDoesNotMatch(t *testing.T) {
 	// Path is "/api" — the .js appears only in the query string, not the path.
-	assert.False(t, isStaticAssetURL("https://example.com/api?cb=x.js"))
+	assert.False(t, pipeline.IsStaticAssetURL("https://example.com/api?cb=x.js"))
 }

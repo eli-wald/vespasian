@@ -19,18 +19,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/praetorian-inc/capability-sdk/pkg/capability"
 	"github.com/praetorian-inc/capability-sdk/pkg/capmodel"
 
+	"github.com/praetorian-inc/vespasian/internal/pipeline"
 	"github.com/praetorian-inc/vespasian/pkg/analyze"
-	"github.com/praetorian-inc/vespasian/pkg/classify"
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
-	"github.com/praetorian-inc/vespasian/pkg/generate"
-	"github.com/praetorian-inc/vespasian/pkg/probe"
 )
 
 // Compile-time interface satisfaction check.
@@ -146,18 +143,44 @@ func (c *Capability) Invoke(ctx capability.ExecutionContext, input capmodel.WebA
 // with the spec if one is produced. Returns (hasSpec, resolvedAPIType).
 func (c *Capability) runScan(ctx capability.ExecutionContext, requests []crawl.ObservedRequest, input capmodel.WebApplication, output capability.Emitter) (bool, string) {
 	if len(requests) == 0 {
-		return false, "rest"
+		return false, pipeline.APITypeREST
 	}
 
 	confidence := parseConfidence(ctx.Parameters)
 	probeEnabled := parseProbeEnabled(ctx.Parameters)
 
 	apiType, _ := ctx.Parameters.GetString("api_type")
-	if apiType == "" || apiType == "auto" {
-		apiType = detectAPIType(requests, confidence)
+	if apiType == "" || apiType == pipeline.APITypeAuto {
+		apiType = pipeline.DetectAPIType(requests, confidence)
 	}
 
-	spec, err := classifyProbeGenerate(context.Background(), requests, apiType, confidence, probeEnabled)
+	// When auto-detection or explicit WSDL/REST mode is active, try fetching a
+	// WSDL document from <primaryURL>?wsdl. SOAP services often return HTML for
+	// browser GETs, so active probing is the reliable discovery method.
+	if apiType == pipeline.APITypeAuto || apiType == pipeline.APITypeWSDL || apiType == pipeline.APITypeREST {
+		wsdlDoc := pipeline.ProbeWSDLDocument(context.Background(), input.PrimaryURL, false, nil)
+		if wsdlDoc != nil {
+			apiType = pipeline.APITypeWSDL
+			requests = append(requests, crawl.ObservedRequest{
+				Method: "GET",
+				URL:    input.PrimaryURL + "?wsdl",
+				Response: crawl.ObservedResponse{
+					StatusCode:  200,
+					ContentType: "text/xml",
+					Body:        wsdlDoc,
+				},
+			})
+		}
+	}
+
+	spec, err := pipeline.ClassifyProbeGenerate(context.Background(), requests, pipeline.Options{
+		APIType:      apiType,
+		Confidence:   confidence,
+		Probe:        probeEnabled,
+		Deduplicate:  true,
+		AllowPrivate: false,
+		Status:       nil,
+	})
 	if err != nil {
 		slog.Warn("vespasian: classify/generate failed", "target", input.PrimaryURL, "error", err)
 		return false, apiType
@@ -235,91 +258,6 @@ func parseProbeEnabled(params capability.Parameters) bool {
 	return p
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline helpers (ported from cmd/vespasian/main.go)
-// ---------------------------------------------------------------------------
-
-// detectAPIType runs lightweight classification against all three API types and
-// picks the winner. GraphQL wins when it has matches and at least as many as
-// both others. WSDL wins when it has matches and at least as many as REST.
-// Otherwise REST is returned.
-func detectAPIType(requests []crawl.ObservedRequest, threshold float64) string {
-	wsdlC := &classify.WSDLClassifier{}
-	restC := &classify.RESTClassifier{}
-	graphqlC := &classify.GraphQLClassifier{}
-
-	var wsdlCount, restCount, graphqlCount int
-	for _, req := range requests {
-		if isAPI, conf := wsdlC.Classify(req); isAPI && conf >= threshold {
-			wsdlCount++
-		}
-		if isAPI, conf := restC.Classify(req); isAPI && conf >= threshold {
-			restCount++
-		}
-		if isAPI, conf := graphqlC.Classify(req); isAPI && conf >= threshold {
-			graphqlCount++
-		}
-	}
-
-	if graphqlCount > 0 && graphqlCount >= wsdlCount && graphqlCount >= restCount {
-		return "graphql"
-	}
-	if wsdlCount > 0 && wsdlCount >= restCount {
-		return "wsdl"
-	}
-	return "rest"
-}
-
-// classifyProbeGenerate runs the classify → probe → generate pipeline.
-func classifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest, apiType string, confidence float64, probeEnabled bool) ([]byte, error) {
-	classifiers := classifiersForType(apiType)
-	if classifiers == nil {
-		return nil, fmt.Errorf("unsupported API type: %q", apiType)
-	}
-
-	classified := classify.Deduplicate(classify.RunClassifiers(classifiers, requests, confidence))
-
-	if probeEnabled {
-		cfg := probe.DefaultConfig()
-		strategies := strategiesForType(apiType, cfg)
-		enriched, probeErrs := probe.RunStrategies(ctx, strategies, classified)
-		for _, e := range probeErrs {
-			slog.Warn("vespasian: probe strategy failed", "error", e)
-		}
-		classified = enriched
-	}
-
-	gen, err := generate.Get(apiType)
-	if err != nil {
-		return nil, fmt.Errorf("vespasian: unsupported api type %q: %w", apiType, err)
-	}
-	return gen.Generate(classified)
-}
-
-func classifiersForType(apiType string) []classify.APIClassifier {
-	switch apiType {
-	case "rest":
-		return []classify.APIClassifier{&classify.RESTClassifier{}}
-	case "wsdl":
-		return []classify.APIClassifier{&classify.WSDLClassifier{}}
-	case "graphql":
-		return []classify.APIClassifier{&classify.GraphQLClassifier{}}
-	default:
-		return nil
-	}
-}
-
-func strategiesForType(apiType string, cfg probe.Config) []probe.ProbeStrategy {
-	switch apiType {
-	case "wsdl":
-		return []probe.ProbeStrategy{probe.NewWSDLProbe(cfg)}
-	case "graphql":
-		return []probe.ProbeStrategy{probe.NewGraphQLProbe(cfg)}
-	default:
-		return []probe.ProbeStrategy{probe.NewOptionsProbe(cfg), probe.NewSchemaProbe(cfg)}
-	}
-}
-
 func specFormatForType(apiType string) string {
 	switch apiType {
 	case "graphql":
@@ -345,7 +283,7 @@ func emitWebpages(requests []crawl.ObservedRequest, parent capmodel.WebApplicati
 		if pageURL == "" {
 			continue
 		}
-		if isStaticAssetURL(pageURL) {
+		if pipeline.IsStaticAssetURL(pageURL) {
 			continue
 		}
 		if _, seen := byURL[pageURL]; !seen {
@@ -414,27 +352,4 @@ func parseHeaders(raw string) map[string]string {
 		}
 	}
 	return headers
-}
-
-// isStaticAssetURL returns true when the URL path has a static-asset extension.
-// Ported from guard/backend/pkg/lib/web/url.go.
-func isStaticAssetURL(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	lower := strings.ToLower(parsed.Path)
-	for _, ext := range staticAssetExtensions {
-		if strings.HasSuffix(lower, ext) {
-			return true
-		}
-	}
-	return false
-}
-
-var staticAssetExtensions = []string{
-	".css", ".js", ".map",
-	".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
-	".woff", ".woff2", ".ttf", ".eot", ".otf", ".webmanifest",
-	".mp4", ".webm", ".mp3", ".ogg",
 }
