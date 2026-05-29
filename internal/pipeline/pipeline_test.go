@@ -35,8 +35,8 @@ import (
 func restRequests() []crawl.ObservedRequest {
 	return []crawl.ObservedRequest{
 		{
-			Method: "GET",
-			URL:    "https://x.com/api/v1/users",
+			Method:  "GET",
+			URL:     "https://x.com/api/v1/users",
 			Headers: map[string]string{"Content-Type": "application/json"},
 			Response: crawl.ObservedResponse{
 				StatusCode:  200,

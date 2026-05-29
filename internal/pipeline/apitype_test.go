@@ -96,8 +96,8 @@ func TestStrategiesForType(t *testing.T) {
 func TestDetectAPIType_PrefersGraphQL(t *testing.T) {
 	requests := []crawl.ObservedRequest{
 		{
-			Method: "POST",
-			URL:    "https://x.com/graphql",
+			Method:  "POST",
+			URL:     "https://x.com/graphql",
 			Headers: map[string]string{"Content-Type": "application/json"},
 			Body:    []byte(`{"query":"{ user { id } }"}`),
 			Response: crawl.ObservedResponse{
