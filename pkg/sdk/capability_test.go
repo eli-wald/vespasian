@@ -19,6 +19,8 @@ import (
 	"errors"
 	"testing"
 
+	"time"
+
 	"github.com/praetorian-inc/capability-sdk/pkg/capability"
 	"github.com/praetorian-inc/capability-sdk/pkg/capmodel"
 	"github.com/stretchr/testify/assert"
@@ -246,6 +248,61 @@ func TestInvoke_ScanMode_InvalidScopeReturnsError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 7. Parameters declaration
+// ---------------------------------------------------------------------------
+
+// TestCapability_Parameters pins the public parameter contract so that an
+// accidental rename (e.g. "api_type" -> "apitype") or default change
+// (e.g. "scan" -> "") would be caught immediately. Parameters() was at 0.0%
+// coverage before this test, meaning such a drift would ship silently.
+func TestCapability_Parameters(t *testing.T) {
+	c := &Capability{}
+	params := c.Parameters()
+
+	// Exactly 9 declared parameters.
+	require.Len(t, params, 9)
+
+	// Build a name -> Parameter map for convenient field assertions.
+	byName := make(map[string]capability.Parameter, len(params))
+	for _, p := range params {
+		byName[p.Name] = p
+	}
+
+	// All expected names must be present.
+	for _, name := range []string{
+		"mode", "api_type", "timeout", "max_pages", "depth",
+		"scope", "headers", "confidence", "probe",
+	} {
+		assert.Contains(t, byName, name, "missing parameter %q", name)
+	}
+
+	// Documented default values.
+	assert.Equal(t, "scan", byName["mode"].Default)
+	assert.Equal(t, "auto", byName["api_type"].Default)
+	assert.Equal(t, "same-origin", byName["scope"].Default)
+	assert.Equal(t, "0.5", byName["confidence"].Default)
+	assert.Equal(t, "true", byName["probe"].Default)
+
+	// WithOptions enum sets for the parameters that have them.
+	assert.ElementsMatch(t, []string{"scan", "crawl"}, byName["mode"].Options)
+	assert.ElementsMatch(t, []string{"auto", "rest", "graphql", "wsdl"}, byName["api_type"].Options)
+	assert.ElementsMatch(t, []string{"same-origin", "same-domain"}, byName["scope"].Options)
+}
+
+// TestCapability_Metadata pins the trivial getter surface (Name, Description,
+// Input, Full, Timeout) that were at 0.0% coverage. Each is a single-statement
+// function; covering them here contributes to the 80% threshold.
+func TestCapability_Metadata(t *testing.T) {
+	c := &Capability{}
+
+	assert.Equal(t, "vespasian", c.Name())
+	assert.NotEmpty(t, c.Description())
+	assert.Equal(t, capmodel.WebApplication{}, c.Input())
+	assert.Equal(t, 5*24*time.Hour, c.Full())
+	assert.Equal(t, 30, c.Timeout())
+}
+
+// ---------------------------------------------------------------------------
 // 5. parseHeaders
 // ---------------------------------------------------------------------------
 
@@ -264,6 +321,28 @@ func TestParseHeaders_Multiple(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "Bearer tok", got["Authorization"])
 	assert.Equal(t, "val", got["X-Custom"])
+}
+
+// ---------------------------------------------------------------------------
+// 8. parseConfidence and specFormatForType (internal helpers)
+// ---------------------------------------------------------------------------
+
+func TestParseConfidence_ParseFailReturnsDefault(t *testing.T) {
+	// "notanumber" cannot be parsed as float — should fall back to 0.5.
+	params := capability.Parameters{capability.String("confidence", "").WithDefault("notanumber")}
+	got := parseConfidence(params)
+	assert.Equal(t, 0.5, got)
+}
+
+func TestParseConfidence_OutOfRangeReturnsDefault(t *testing.T) {
+	// Value > 1 is out of [0,1] — should fall back to 0.5.
+	params := capability.Parameters{capability.String("confidence", "").WithDefault("1.5")}
+	got := parseConfidence(params)
+	assert.Equal(t, 0.5, got)
+}
+
+func TestSpecFormatForType_WSDL(t *testing.T) {
+	assert.Equal(t, capmodel.SpecFormatWSDL, specFormatForType("wsdl"))
 }
 
 // ---------------------------------------------------------------------------
