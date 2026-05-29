@@ -84,8 +84,8 @@ func ProbeWSDLDocument(ctx context.Context, targetURL string, allowPrivate bool,
 		return nil
 	}
 	defer func() {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)) //nolint:errcheck,gosec // best-effort drain
-		resp.Body.Close()                                    //nolint:errcheck,gosec // best-effort close
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)) //nolint:errcheck // best-effort drain
+		_ = resp.Body.Close()                                       //nolint:errcheck // best-effort close
 	}()
 
 	if resp.StatusCode >= 400 {
