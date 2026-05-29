@@ -71,6 +71,7 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 		if opts.AllowPrivate {
 			cfg.URLValidator = func(string) error { return nil }
 			cfg.Client = &http.Client{
+				Timeout: 15 * time.Second,
 				CheckRedirect: func(req *http.Request, via []*http.Request) error {
 					return http.ErrUseLastResponse
 				},
