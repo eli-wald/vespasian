@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -247,6 +248,9 @@ func parseConfidence(params capability.Parameters) float64 {
 	}
 	var v float64
 	if _, err := fmt.Sscanf(cf, "%f", &v); err != nil {
+		return 0.5
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 		return 0.5
 	}
 	return v
