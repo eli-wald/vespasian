@@ -62,7 +62,10 @@ func ProbeWSDLDocument(ctx context.Context, targetURL string, allowPrivate bool,
 		DialContext: probe.SSRFSafeDialContext,
 	}
 	if allowPrivate {
-		transport = &http.Transport{}
+		transport = &http.Transport{
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+		}
 	}
 	client := &http.Client{
 		Timeout:   15 * time.Second,
