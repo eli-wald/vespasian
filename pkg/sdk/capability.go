@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/url"
@@ -38,6 +39,10 @@ var _ capability.Capability[capmodel.WebApplication] = (*Capability)(nil)
 // crawlFunc is a package-level seam that tests can swap to avoid launching a
 // real browser. Signature matches defaultCrawl; tests replace it with a stub.
 var crawlFunc func(ctx context.Context, opts crawl.CrawlerOptions, target string) ([]crawl.ObservedRequest, error) = defaultCrawl
+
+// wsdlProbeFunc is a package-level seam that tests can swap to avoid making a
+// real network call when exercising the WSDL-discovery branch in runScan.
+var wsdlProbeFunc func(ctx context.Context, targetURL string, requests []crawl.ObservedRequest, allowPrivate bool, status io.Writer) ([]crawl.ObservedRequest, bool, string) = pipeline.ProbeAndAppendWSDLRequest
 
 // Capability implements capability.Capability[capmodel.WebApplication] and
 // exposes the vespasian crawl → classify → probe → generate pipeline through
@@ -153,12 +158,12 @@ func (c *Capability) runScan(ctx capability.ExecutionContext, requests []crawl.O
 		apiType = pipeline.DetectAPIType(requests, confidence)
 	}
 
-	// When explicit WSDL/REST mode is active, try fetching a WSDL document
+	// When the resolved API type is WSDL or REST, try fetching a WSDL document
 	// from <primaryURL>?wsdl. SOAP services often return HTML for browser GETs,
 	// so active probing is the reliable discovery method.
 	if apiType == pipeline.APITypeWSDL || apiType == pipeline.APITypeREST {
 		var foundWSDL bool
-		requests, foundWSDL, _ = pipeline.ProbeAndAppendWSDLRequest(context.Background(), input.PrimaryURL, requests, false, nil)
+		requests, foundWSDL, _ = wsdlProbeFunc(context.Background(), input.PrimaryURL, requests, false, nil)
 		if foundWSDL {
 			apiType = pipeline.APITypeWSDL
 		}
@@ -224,7 +229,11 @@ func crawlOptsFromCtx(ctx capability.ExecutionContext) (crawl.CrawlerOptions, er
 		opts.Depth = d
 	}
 	if h, ok := ctx.Parameters.GetString("headers"); ok && h != "" {
-		opts.Headers = parseHeaders(h)
+		parsed, err := parseHeaders(h)
+		if err != nil {
+			return crawl.CrawlerOptions{}, fmt.Errorf("vespasian: %w", err)
+		}
+		opts.Headers = parsed
 	}
 	return opts, nil
 }
@@ -292,16 +301,14 @@ func emitWebpages(requests []crawl.ObservedRequest, parent capmodel.WebApplicati
 		byURL[pageKey] = append(byURL[pageKey], toWebpageRequest(req))
 	}
 
-	count := 0
 	for _, u := range order {
 		_ = output.Emit(capmodel.Webpage{ //nolint:errcheck // emitter errors are non-fatal; logged by host
 			URL:      u,
 			Requests: byURL[u],
 			Parent:   parent,
 		})
-		count++
 	}
-	return count
+	return len(order)
 }
 
 // toWebpageRequest converts a crawl.ObservedRequest to capmodel.WebpageRequest,
@@ -339,19 +346,25 @@ func toMultiValueHeaders(headers map[string]string) map[string][]string {
 // Utility helpers
 // ---------------------------------------------------------------------------
 
-// parseHeaders parses a comma-separated "Key: Value, K2: V2" string.
-// Whitespace around keys and values is trimmed. Returns nil for empty input.
-// Note: parseHeaders does not support header values containing commas; a value
-// like "Accept: text/html, application/xhtml+xml" will be split at the comma.
-func parseHeaders(raw string) map[string]string {
+// parseHeaders parses a comma-separated "Key: Value, K2: V2" string. Whitespace
+// around keys and values is trimmed. Each entry is validated via crawl.ParseHeader
+// (RFC 7230 names; no CR/LF/NUL in values). Header values containing commas are
+// not supported — the value will be split at the first comma.
+func parseHeaders(raw string) (map[string]string, error) {
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	headers := make(map[string]string)
 	for _, hdr := range strings.Split(raw, ",") {
-		if k, v, ok := strings.Cut(strings.TrimSpace(hdr), ":"); ok {
-			headers[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		hdr = strings.TrimSpace(hdr)
+		if hdr == "" {
+			continue
 		}
+		name, value, err := crawl.ParseHeader(hdr)
+		if err != nil {
+			return nil, err
+		}
+		headers[name] = value
 	}
-	return headers
+	return headers, nil
 }

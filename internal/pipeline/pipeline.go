@@ -62,9 +62,7 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 		classified = classify.Deduplicate(classified)
 	}
 
-	if opts.Status != nil {
-		fmt.Fprintf(opts.Status, "classified %d API requests (threshold=%.2f)\n", len(classified), opts.Confidence) //nolint:errcheck,gosec
-	}
+	writeStatus(opts.Status, "classified %d API requests (threshold=%.2f)\n", len(classified), opts.Confidence)
 
 	if opts.Probe {
 		cfg := probe.DefaultConfig()
@@ -83,10 +81,8 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 		}
 		strategies := StrategiesForType(opts.APIType, cfg)
 		enriched, probeErrs := probe.RunStrategies(ctx, strategies, classified)
-		if opts.Status != nil {
-			for _, e := range probeErrs {
-				fmt.Fprintf(opts.Status, "probe warning: %v\n", e) //nolint:errcheck,gosec
-			}
+		for _, e := range probeErrs {
+			writeStatus(opts.Status, "probe warning: %v\n", e)
 		}
 		classified = enriched
 	}

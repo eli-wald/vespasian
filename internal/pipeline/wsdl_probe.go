@@ -36,6 +36,26 @@ func writeStatus(w io.Writer, format string, args ...any) {
 	fmt.Fprintf(w, format, args...) //nolint:errcheck,gosec // best-effort status output
 }
 
+// buildWSDLProbeClient constructs the HTTP client used by ProbeWSDLDocument.
+// When allowPrivate is false the transport uses SSRF-safe dialing; when true
+// it mirrors the timeouts applied to AllowPrivate probes elsewhere.
+func buildWSDLProbeClient(allowPrivate bool) *http.Client {
+	transport := &http.Transport{DialContext: probe.SSRFSafeDialContext}
+	if allowPrivate {
+		transport = &http.Transport{
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+		}
+	}
+	return &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // ProbeWSDLDocument attempts to fetch a WSDL document from targetURL?wsdl.
 // Returns the raw WSDL bytes on success, or nil if the probe fails or the
 // response is not a valid WSDL document. status is an optional io.Writer
@@ -58,22 +78,7 @@ func ProbeWSDLDocument(ctx context.Context, targetURL string, allowPrivate bool,
 		}
 	}
 
-	transport := &http.Transport{
-		DialContext: probe.SSRFSafeDialContext,
-	}
-	if allowPrivate {
-		transport = &http.Transport{
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Second,
-		}
-	}
-	client := &http.Client{
-		Timeout:   15 * time.Second,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := buildWSDLProbeClient(allowPrivate)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wsdlURL, nil)
 	if err != nil {

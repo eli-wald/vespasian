@@ -95,59 +95,26 @@ func injectRequestID(headers map[string]string, disabled bool) (string, error) {
 	return id, nil
 }
 
-// parseHeaders converts "Key: Value" strings to a map, validating header names
-// against RFC 7230 token production and header values against CRLF injection.
+// parseHeaders converts "Key: Value" strings to a map. Validation is delegated
+// to crawl.ParseHeader (RFC 7230 names; no CR/LF/NUL in values).
 func parseHeaders(raw []string) (map[string]string, error) {
 	headers := make(map[string]string)
 	for _, h := range raw {
-		parts := strings.SplitN(h, ":", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid header format (expected 'Key: Value'): %q", h)
-		}
-		name := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		if name == "" {
-			return nil, fmt.Errorf("header has empty name: %q", h)
-		}
-		if !isValidHeaderName(name) {
-			return nil, fmt.Errorf("header name contains invalid characters (RFC 7230): %q", h)
-		}
-		if strings.ContainsAny(value, "\r\n\x00") {
-			return nil, fmt.Errorf("header value contains invalid characters: %q", h)
+		name, value, err := crawl.ParseHeader(h)
+		if err != nil {
+			return nil, err
 		}
 		headers[name] = value
 	}
 	return headers, nil
 }
 
-// isValidHeaderName checks that name consists only of RFC 7230 token characters.
-// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
-//
-//	"^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
-func isValidHeaderName(name string) bool {
-	for i := 0; i < len(name); i++ {
-		if !isTokenChar(name[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// isTokenChar returns true if c is a valid RFC 7230 tchar.
-func isTokenChar(c byte) bool { //nolint:gocyclo // character-class lookup table
-	switch {
-	case c >= 'A' && c <= 'Z':
-		return true
-	case c >= 'a' && c <= 'z':
-		return true
-	case c >= '0' && c <= '9':
-		return true
-	case c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
-		c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' ||
-		c == '^' || c == '_' || c == '`' || c == '|' || c == '~':
-		return true
-	default:
-		return false
+// warnSSRFDisabled writes the SSRF-protection warning to stderr when both
+// allowPrivate and probe are enabled. The combination means active probes may
+// reach private/internal hosts.
+func warnSSRFDisabled(allowPrivate, probe bool) {
+	if allowPrivate && probe {
+		fmt.Fprintf(os.Stderr, "WARNING: SSRF protection disabled — probes may target private/internal networks\n") //nolint:errcheck // best-effort warning
 	}
 }
 
@@ -522,9 +489,7 @@ func (c *GenerateCmd) Run() (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if c.DangerousAllowPrivate && c.Probe {
-		fmt.Fprintf(os.Stderr, "WARNING: SSRF protection disabled — probes may target private/internal networks\n")
-	}
+	warnSSRFDisabled(c.DangerousAllowPrivate, c.Probe)
 
 	spec, err := pipeline.ClassifyProbeGenerate(ctx, requests, pipeline.Options{
 		APIType:      c.APIType,
@@ -612,7 +577,7 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	genCtx, genStop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer genStop()
 
-	// When explicit WSDL/REST mode is active, try fetching a WSDL document
+	// When the resolved API type is WSDL or REST, try fetching a WSDL document
 	// from <targetURL>?wsdl. SOAP services return HTML for browser GETs so
 	// crawl traffic rarely contains WSDL signals — active probing is the
 	// reliable discovery method.
@@ -631,9 +596,7 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 		fmt.Fprintf(os.Stderr, "generating %s spec\n", apiTypeDisplayName(apiType)) //nolint:gosec // G705: writing to stderr, not web response
 	}
 
-	if c.DangerousAllowPrivate && c.Probe {
-		fmt.Fprintf(os.Stderr, "WARNING: SSRF protection disabled — probes may target private/internal networks\n")
-	}
+	warnSSRFDisabled(c.DangerousAllowPrivate, c.Probe)
 
 	spec, err := pipeline.ClassifyProbeGenerate(genCtx, requests, pipeline.Options{
 		APIType:      apiType,

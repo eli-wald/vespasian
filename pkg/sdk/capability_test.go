@@ -17,6 +17,7 @@ package sdk
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"time"
@@ -65,6 +66,21 @@ func stubCrawl(t *testing.T, requests []crawl.ObservedRequest, err error) {
 	t.Cleanup(func() { crawlFunc = orig })
 }
 
+// stubWSDLProbe replaces wsdlProbeFunc and registers Cleanup to restore it.
+// When augmented is non-nil it is returned as the augmented request slice;
+// otherwise the original request slice is passed through.
+func stubWSDLProbe(t *testing.T, augmented []crawl.ObservedRequest, foundWSDL bool, resolvedType string) {
+	t.Helper()
+	orig := wsdlProbeFunc
+	wsdlProbeFunc = func(_ context.Context, _ string, requests []crawl.ObservedRequest, _ bool, _ io.Writer) ([]crawl.ObservedRequest, bool, string) {
+		if augmented != nil {
+			return augmented, foundWSDL, resolvedType
+		}
+		return requests, foundWSDL, resolvedType
+	}
+	t.Cleanup(func() { wsdlProbeFunc = orig })
+}
+
 func collect(t *testing.T, c *Capability, ctx capability.ExecutionContext, input capmodel.WebApplication) (webpages []capmodel.Webpage, webApps []capmodel.WebApplication, err error) {
 	t.Helper()
 	emitter := capability.EmitterFunc(func(models ...any) error {
@@ -107,6 +123,13 @@ func TestMatch_RejectsNonHTTP(t *testing.T) {
 	assert.Contains(t, err.Error(), "HTTP/HTTPS")
 }
 
+func TestMatch_RejectsEmptyHost(t *testing.T) {
+	c := &Capability{}
+	err := c.Match(emptyCtx(), capmodel.WebApplication{PrimaryURL: "https:///path", Seed: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP/HTTPS")
+}
+
 func TestMatch_RejectsNonSeed(t *testing.T) {
 	c := &Capability{}
 	err := c.Match(emptyCtx(), capmodel.WebApplication{PrimaryURL: "https://x.com", Seed: false})
@@ -139,6 +162,19 @@ func TestInvoke_CrawlMode_EmitsWebpagesFiltersStaticAssets(t *testing.T) {
 	assert.Len(t, webpages, 1, "only the non-static URL should be emitted")
 	assert.Equal(t, "https://x.com/api", webpages[0].URL)
 	assert.Empty(t, webApps, "crawl mode must not emit WebApplication")
+}
+
+func TestInvoke_CrawlMode_FiltersStaticParentPage(t *testing.T) {
+	stubCrawl(t, []crawl.ObservedRequest{
+		{Method: "GET", URL: "https://x.com/api/data", PageURL: "https://x.com/bundle.js", Response: crawl.ObservedResponse{StatusCode: 200}},
+	}, nil)
+
+	c := &Capability{}
+	ctx := ctxWithParams("mode", "crawl")
+	webpages, _, err := collect(t, c, ctx, seedApp("https://x.com"))
+
+	require.NoError(t, err)
+	assert.Empty(t, webpages, "non-static XHR attributed to a static parent page must be filtered")
 }
 
 // TEST-007: pins the grouping contract — multiple requests sharing a PageURL
@@ -203,6 +239,7 @@ func TestInvoke_ScanMode_RESTTrafficEmitsOpenAPISpec(t *testing.T) {
 			},
 		},
 	}, nil)
+	stubWSDLProbe(t, nil, false, "")
 
 	c := &Capability{}
 	ctx := ctxWithParams("mode", "scan", "api_type", "rest", "probe", "false")
@@ -212,6 +249,40 @@ func TestInvoke_ScanMode_RESTTrafficEmitsOpenAPISpec(t *testing.T) {
 	require.Len(t, webApps, 1)
 	assert.NotEmpty(t, webApps[0].Spec)
 	assert.Equal(t, capmodel.SpecFormatOpenAPI, webApps[0].SpecFormat)
+}
+
+func TestInvoke_ScanMode_WSDLPromotionFromREST(t *testing.T) {
+	wsdlBody := []byte(`<?xml version="1.0"?>
+<definitions name="Calculator"
+  xmlns="http://schemas.xmlsoap.org/wsdl/"
+  xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+  xmlns:tns="http://example.com/"
+  targetNamespace="http://example.com/">
+  <message name="AddRequest"><part name="parameters" element="tns:Add"/></message>
+  <message name="AddResponse"><part name="parameters" element="tns:AddResponse"/></message>
+  <portType name="CalculatorPortType">
+    <operation name="Add">
+      <input message="tns:AddRequest"/>
+      <output message="tns:AddResponse"/>
+    </operation>
+  </portType>
+</definitions>`)
+	stubCrawl(t, []crawl.ObservedRequest{
+		{Method: "GET", URL: "https://x.com/api", Response: crawl.ObservedResponse{StatusCode: 200, ContentType: "application/json", Body: []byte("{}")}},
+	}, nil)
+	stubWSDLProbe(t, []crawl.ObservedRequest{
+		{Method: "GET", URL: "https://x.com/api", Response: crawl.ObservedResponse{StatusCode: 200, ContentType: "application/json", Body: []byte("{}")}},
+		{Method: "GET", URL: "https://x.com/?wsdl", Response: crawl.ObservedResponse{StatusCode: 200, ContentType: "text/xml", Body: wsdlBody}},
+	}, true, pipeline.APITypeWSDL)
+
+	c := &Capability{}
+	ctx := ctxWithParams("mode", "scan", "api_type", "rest", "probe", "false")
+	_, webApps, err := collect(t, c, ctx, seedApp("https://x.com"))
+
+	require.NoError(t, err)
+	require.Len(t, webApps, 1)
+	assert.NotEmpty(t, webApps[0].Spec)
+	assert.Equal(t, capmodel.SpecFormatWSDL, webApps[0].SpecFormat, "REST→WSDL promotion must select the WSDL spec format")
 }
 
 func TestInvoke_ScanMode_NoTrafficEmitsNoWebApplication(t *testing.T) {
@@ -224,6 +295,20 @@ func TestInvoke_ScanMode_NoTrafficEmitsNoWebApplication(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, webApps)
 	assert.Empty(t, webpages)
+}
+
+func TestInvoke_ScanMode_PipelineErrorReturnsNoSpec(t *testing.T) {
+	stubCrawl(t, []crawl.ObservedRequest{
+		{Method: "GET", URL: "https://x.com/api", Response: crawl.ObservedResponse{StatusCode: 200}},
+	}, nil)
+
+	c := &Capability{}
+	ctx := ctxWithParams("mode", "scan", "api_type", "frobnitz", "probe", "false")
+	webpages, webApps, err := collect(t, c, ctx, seedApp("https://x.com"))
+
+	require.NoError(t, err)
+	assert.Empty(t, webApps, "pipeline error must not emit a WebApplication")
+	assert.Len(t, webpages, 1, "webpages emitted before runScan must still flow")
 }
 
 func TestInvoke_ScanMode_ExplicitGraphQLTypeEmitsGraphQLSpec(t *testing.T) {
@@ -327,32 +412,30 @@ func TestCapability_Metadata(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseHeaders_Empty(t *testing.T) {
-	assert.Nil(t, parseHeaders(""))
+	got, err := parseHeaders("")
+	require.NoError(t, err)
+	assert.Nil(t, got)
 }
 
 func TestParseHeaders_Single(t *testing.T) {
-	got := parseHeaders("Authorization: Bearer tok")
+	got, err := parseHeaders("Authorization: Bearer tok")
+	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "Bearer tok", got["Authorization"])
 }
 
 func TestParseHeaders_Multiple(t *testing.T) {
-	got := parseHeaders("Authorization: Bearer tok, X-Custom: val")
+	got, err := parseHeaders("Authorization: Bearer tok, X-Custom: val")
+	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "Bearer tok", got["Authorization"])
 	assert.Equal(t, "val", got["X-Custom"])
 }
 
-func TestParseHeaders_SkipsMissingColon(t *testing.T) {
-	// Malformed entries (no colon) are silently dropped — well-formed entries
-	// on either side are still parsed.
-	got := parseHeaders("Authorization: Bearer tok, bad-entry, X-Foo: v")
-	require.NotNil(t, got)
-	assert.Len(t, got, 2)
-	assert.Equal(t, "Bearer tok", got["Authorization"])
-	assert.Equal(t, "v", got["X-Foo"])
-	_, exists := got["bad-entry"]
-	assert.False(t, exists, "malformed entry must not be present as a key")
+func TestParseHeaders_ReturnsErrorOnMissingColon(t *testing.T) {
+	_, err := parseHeaders("Authorization: Bearer tok, bad-entry, X-Foo: v")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid header format")
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +452,12 @@ func TestParseConfidence_ParseFailReturnsDefault(t *testing.T) {
 func TestParseConfidence_OutOfRangeReturnsDefault(t *testing.T) {
 	// Value > 1 is out of [0,1] — should fall back to 0.5.
 	params := capability.Parameters{capability.String("confidence", "").WithDefault("1.5")}
+	got := parseConfidence(params)
+	assert.Equal(t, 0.5, got)
+}
+
+func TestParseConfidence_NegativeReturnsDefault(t *testing.T) {
+	params := capability.Parameters{capability.String("confidence", "").WithDefault("-0.1")}
 	got := parseConfidence(params)
 	assert.Equal(t, 0.5, got)
 }
