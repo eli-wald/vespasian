@@ -87,6 +87,18 @@ func stubWSDLProbe(t *testing.T, augmented []crawl.ObservedRequest, foundWSDL bo
 	t.Cleanup(func() { wsdlResolveFunc = orig })
 }
 
+// stubJSAnalyze replaces jsAnalyzeFunc and registers Cleanup to restore it.
+// The supplied fn receives the request slice passed to the seam and returns
+// the (possibly augmented) slice that the pipeline should continue with.
+func stubJSAnalyze(t *testing.T, fn func(requests []crawl.ObservedRequest) []crawl.ObservedRequest) {
+	t.Helper()
+	orig := jsAnalyzeFunc
+	jsAnalyzeFunc = func(_ context.Context, requests []crawl.ObservedRequest) []crawl.ObservedRequest {
+		return fn(requests)
+	}
+	t.Cleanup(func() { jsAnalyzeFunc = orig })
+}
+
 func collect(t *testing.T, c *Capability, ctx capability.ExecutionContext, input capmodel.WebApplication) (webpages []capmodel.Webpage, webApps []capmodel.WebApplication, err error) {
 	t.Helper()
 	emitter := capability.EmitterFunc(func(models ...any) error {
@@ -296,6 +308,44 @@ func TestInvoke_CrawlMode_ErrorPropagation(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "crawl failed")
 	assert.Contains(t, err.Error(), "connection refused")
+}
+
+// TEST-001: the jsAnalyzeFunc seam is wired into Invoke — its output (not the
+// pre-augmentation slice) is what flows downstream to webpage emission. The
+// stub injects a synthetic request and we assert it surfaces as a Webpage.
+func TestInvoke_CrawlMode_AppliesJSAnalyzeSeam(t *testing.T) {
+	stubCrawl(t, []crawl.ObservedRequest{
+		{Method: "GET", URL: "https://x.com/index", PageURL: "https://x.com/index", Response: crawl.ObservedResponse{StatusCode: 200}},
+	}, nil)
+	stubJSAnalyze(t, func(requests []crawl.ObservedRequest) []crawl.ObservedRequest {
+		return append(requests, crawl.ObservedRequest{
+			Method:   "GET",
+			URL:      "https://x.com/api/from-js",
+			PageURL:  "https://x.com/api/from-js",
+			Source:   crawl.SourceStaticJS,
+			Response: crawl.ObservedResponse{StatusCode: 200},
+		})
+	})
+
+	c := &Capability{}
+	webpages, _, err := collect(t, c, ctxWithParams("mode", "crawl"), seedApp("https://x.com"))
+
+	require.NoError(t, err)
+	urls := make([]string, 0, len(webpages))
+	for _, w := range webpages {
+		urls = append(urls, w.URL)
+	}
+	assert.Contains(t, urls, "https://x.com/api/from-js", "seam-injected request must flow into emitted webpages")
+}
+
+// TEST-001: defaultJSAnalyze short-circuits (no network, returns input
+// unchanged) when the capture already carries JS-static sources.
+func TestDefaultJSAnalyze_ShortCircuitsOnExistingStaticSource(t *testing.T) {
+	in := []crawl.ObservedRequest{
+		{Method: "GET", URL: "https://x.com/api", Source: crawl.SourceStaticJS, Response: crawl.ObservedResponse{StatusCode: 200}},
+	}
+	out := defaultJSAnalyze(context.Background(), in)
+	assert.Equal(t, in, out, "must return the input unchanged when a JS-static source is already present")
 }
 
 // ---------------------------------------------------------------------------

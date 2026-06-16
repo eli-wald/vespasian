@@ -109,6 +109,11 @@ func (c *Capability) Invoke(ctx capability.ExecutionContext, input capmodel.WebA
 	if mode == "" {
 		mode = "scan"
 	}
+	// Parameter Options are advisory in capability-sdk (not host-validated), so
+	// an out-of-range mode reaches here; reject it rather than silently scanning.
+	if mode != "scan" && mode != "crawl" {
+		return fmt.Errorf("vespasian: invalid mode %q, must be 'scan' or 'crawl'", mode)
+	}
 
 	opts, err := crawlOptsFromCtx(ctx)
 	if err != nil {

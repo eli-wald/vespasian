@@ -66,7 +66,7 @@ The CLI (`cmd/vespasian`) uses Kong for argument parsing. Each command (crawl, i
 ### Key Packages
 
 - **cmd/vespasian**: CLI entry point, command definitions, signal handling, browser lifecycle management
-- **internal/pipeline**: Shared crawl/classify/probe/generate orchestration consumed by both the CLI (`cmd/vespasian`) and the SDK (`pkg/sdk`). Exports `DetectAPIType`, `ClassifiersForType`, `StrategiesForType`, `ClassifyProbeGenerate`, `ProbeAndAppendWSDLRequest`, `ProbeWSDLDocument`, and `IsStaticAssetURL`.
+- **internal/pipeline**: Shared crawl/classify/probe/generate orchestration consumed by both the CLI (`cmd/vespasian`) and the SDK (`pkg/sdk`). Exports `DetectAPIType`, `ClassifiersForType`, `StrategiesForType`, `ClassifyProbeGenerate`, `ResolveWSDLType`, `ProbeAndAppendWSDLRequest`, `ProbeWSDLDocument`, and `IsStaticAssetURL`.
 - **pkg/crawl**: Two crawler backends — headless mode uses go-rod to drive Chrome tabs (full JS/SPA support); non-headless mode uses a stdlib net/http engine with DFS frontier, 150 rps rate limiter, and scope+SSRF redirect guard. Both produce `ObservedRequest` values. Also owns capture file I/O and browser manager lifecycle.
 - **pkg/analyze**: Static analysis of captured HTML response bodies; extracts `<form>` endpoints and parameter names as synthetic `ObservedRequest` entries (`Source="static:html"`) to surface form-based APIs not triggered during crawl
 - **pkg/classify**: Request classification engine with confidence-based heuristics; classifiers for REST, GraphQL, and WSDL; deduplication
