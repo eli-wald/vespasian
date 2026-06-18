@@ -86,7 +86,7 @@ func (s *accountServer) GetAccount(_ context.Context, req *labpb.GetAccountReque
 }
 
 func main() {
-	port := flag.String("port", "", "TCP port to listen on (overrides $GRPC_PORT and the default 8993)")
+	port := flag.String("port", "", "TCP port to listen on (overrides $GRPC_PORT and the default 50051)")
 	flag.Parse()
 
 	resolved := *port

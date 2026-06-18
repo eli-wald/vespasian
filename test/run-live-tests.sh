@@ -509,16 +509,37 @@ with open(expected_path) as f:
 
 errors = []
 
-# Check each expected service by short name (vespasian uses short names, not FQNs)
+def service_body(short_name):
+    # Service bodies contain only rpc declarations (no nested braces), so a
+    # match to the next closing brace isolates one service block.
+    m = re.search(r'service\s+' + re.escape(short_name) + r'\s*\{(?P<body>[^}]*)\}', spec)
+    return m.group("body") if m else None
+
+# Check each expected service by short name (vespasian renders short names, not
+# FQNs) and scope RPC matching to that service's body, so a method declared
+# under a different service cannot satisfy the check.
 for fqn, methods in expected["services"].items():
     short_name = fqn.split(".")[-1]
-    pattern = r'service\s+' + re.escape(short_name) + r'\s*\{'
-    if not re.search(pattern, spec):
+    body = service_body(short_name)
+    if body is None:
         errors.append("Missing service: %s (short name: %s)" % (fqn, short_name))
+        continue
     for method in methods:
-        rpc_pattern = r'rpc\s+' + re.escape(method) + r'\s*\('
-        if not re.search(rpc_pattern, spec):
+        if not re.search(r'\brpc\s+' + re.escape(method) + r'\s*\(', body):
             errors.append("Missing rpc: %s in %s" % (method, short_name))
+
+# Validate server-streaming methods keep their `stream` return marker so a
+# streaming->unary regression is caught.
+for full in expected.get("streaming_methods", []):
+    svc_fqn, method = full.split("/", 1)
+    short_name = svc_fqn.split(".")[-1]
+    body = service_body(short_name)
+    if body is None:
+        errors.append("Missing service for streaming check: %s" % svc_fqn)
+        continue
+    stream_re = r'\brpc\s+' + re.escape(method) + r'\s*\([^)]*\)\s+returns\s*\(\s*stream\b'
+    if not re.search(stream_re, body, flags=re.S):
+        errors.append("Missing server-streaming rpc signature: %s" % full)
 
 if errors:
     for e in errors:
@@ -2474,7 +2495,7 @@ usage() {
     echo "Options:"
     echo "  --targets <list>      Comma-separated targets to test (default: all)"
     echo "                        Valid targets:"
-    echo "                          Live:       rest-api, soap-service, graphql-server"
+    echo "                          Live:       rest-api, soap-service, graphql-server, grpc-server"
     echo "                          Generate:   generate-rest, generate-wsdl, generate-wsdl-matrix,"
     echo "                                      generate-graphql, generate-graphql-imports,"
     echo "                                      generate-js-static"
