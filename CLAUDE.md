@@ -63,7 +63,7 @@ The CLI (`cmd/vespasian`) uses Kong for argument parsing. Each command (crawl, i
 6. Probe endpoints via `probe.RunStrategies()` (OPTIONS, schema, WSDL fetch, GraphQL introspection, gRPC reflection)
 7. Generate spec via `generate.Get(apiType).Generate()`
 
-Note: `detectAPIType` (auto mode) runs only the REST/WSDL/GraphQL classifiers — gRPC is never auto-selected and requires explicit `--api-type grpc`. There is also a standalone `vespasian probe grpc reflection <url>` command that runs the reflection probe and emits `.proto` directly, without a capture file.
+Note: `detectAPIType` (auto mode) runs only the REST/WSDL/GraphQL classifiers — gRPC is never auto-selected and requires explicit `--api-type grpc`.
 
 ### Key Packages
 
@@ -102,7 +102,6 @@ The `query_params` field is `map[string][]string` (multi-value). Capture files g
 | `crawl`   | Capture traffic via headless browser → capture.json. Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default true) |
 | `import`  | Convert Burp XML / HAR / mitmproxy → capture.json |
 | `generate` | Produce spec from capture.json (REST→OpenAPI, GraphQL→SDL, WSDL→WSDL, gRPC→`.proto`). Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default false). `grpc` must be passed explicitly and needs reflection descriptors in the capture. |
-| `probe`   | Run a single discovery probe directly against a target (no capture file). Subcommand: `probe grpc reflection <url>` enumerates services via Server Reflection and emits `.proto`. |
 | `version` | Show version information |
 
 ## Test Infrastructure

@@ -315,32 +315,6 @@ vespasian generate <api-type> <capture-file> [flags]
   -v, --verbose      Show discovered endpoints
 ```
 
-### `vespasian probe`
-
-Runs a single discovery probe directly against a target, without a capture file. Currently exposes the gRPC reflection probe, which enumerates services and emits the rendered `.proto`:
-
-```
-vespasian probe grpc reflection <url> [flags]
-  <url>              Target URL (e.g., https://grpc.example.com:443). Port is
-                     required for non-standard gRPC ports such as :50051.
-  -o, --output       Output .proto file path (default: stdout)
-  --timeout          Per-request timeout (default: 10s)
-  --dangerous-allow-private  Disable SSRF protection for private/localhost
-                     targets (localhost, 127.0.0.1, RFC1918, link-local).
-                     WARNING: Do not use on production systems.
-  -v, --verbose      Enable verbose logging
-```
-
-```bash
-# Enumerate a reflection-enabled server and write the reconstructed .proto
-vespasian probe grpc reflection https://grpc.example.com:443 -o api.proto
-
-# Probe a local test server (reflection on a non-standard port)
-vespasian probe grpc reflection http://localhost:50051 --dangerous-allow-private -o api.proto
-```
-
-If reflection is disabled or gated, the command exits with the gRPC status reason (e.g. `reflection not available on <url> (gRPC Unimplemented)`).
-
 ## Architecture
 
 ### Pipeline Components
@@ -380,7 +354,7 @@ Vespasian discovers **REST APIs** (generating OpenAPI 3.0 specs), **GraphQL APIs
 
 ### How does Vespasian discover gRPC services?
 
-gRPC services are enumerated through the [Server Reflection Protocol](https://github.com/grpc/grpc/blob/master/doc/server-reflection.md): Vespasian asks the server to describe its own services, methods, and message types, then reconstructs a proto3 `.proto` from the returned descriptors. Run it with `vespasian probe grpc reflection <url>` for a one-shot probe, or `--api-type grpc` in the `scan`/`generate` pipeline. If a server has reflection **disabled or auth-gated**, Vespasian reports the gRPC status reason (`Unimplemented`, `Unauthenticated`, `PermissionDenied`) rather than failing silently — but cannot reconstruct the schema, since `.proto` generation currently requires reflection descriptors.
+gRPC services are enumerated through the [Server Reflection Protocol](https://github.com/grpc/grpc/blob/master/doc/server-reflection.md): Vespasian asks the server to describe its own services, methods, and message types, then reconstructs a proto3 `.proto` from the returned descriptors. Run it via `--api-type grpc` in the `scan`/`generate` pipeline. If a server has reflection **disabled or auth-gated**, Vespasian reports the gRPC status reason (`Unimplemented`, `Unauthenticated`, `PermissionDenied`) rather than failing silently — but cannot reconstruct the schema, since `.proto` generation currently requires reflection descriptors.
 
 ### How is Vespasian different from running a web crawler?
 
