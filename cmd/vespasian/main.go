@@ -503,6 +503,8 @@ type GenerateCmd struct {
 	Verbose               bool    `short:"v" help:"Enable verbose logging"`
 	AnalyzeJS             bool    `name:"analyze-js"       default:"true"  help:"Statically analyze JS bundles in the imported capture (when present)."`
 	FetchSourcemaps       bool    `name:"fetch-sourcemaps" default:"false" help:"When --analyze-js is set, fetch .js.map sourcemaps referenced via //# sourceMappingURL= comments. Default false on generate (offline-friendly)."`
+	MergeSlugs            bool    `name:"merge-slugs" help:"Collapse sibling paths whose varying segment looks like content (a \"slug\") into one {slug} parameter. Off by default. USE IT when scanning slug-driven content where each path is the same endpoint with different data (e.g. a blog or CMS): /posts/hello-world,/posts/my-trip -> /posts/{postSlug}. LEAVE IT OFF when distinct path segments are distinct endpoints you don't want to lose (e.g. /feature/login,/feature/export stay separate). Note: numeric/UUID/hash IDs (/users/42) are always normalized regardless of this flag."`
+	SlugThreshold         int     `name:"slug-threshold" default:"2" help:"How many distinct values must appear at a path position before --merge-slugs collapses it into a {slug} parameter. Higher = more conservative (needs more samples before merging), which helps on sparse captures. Ignored unless --merge-slugs is set. Minimum 2."`
 }
 
 // API type constants used for classification routing and generation.
@@ -561,12 +563,14 @@ func (c *GenerateCmd) Run() (err error) {
 	})
 
 	spec, err := generateSpec(ctx, requests, generateSpecOptions{
-		APIType:      c.APIType,
-		Confidence:   c.Confidence,
-		Probe:        c.Probe,
-		Deduplicate:  c.Deduplicate,
-		AllowPrivate: c.DangerousAllowPrivate,
-		Verbose:      c.Verbose,
+		APIType:       c.APIType,
+		Confidence:    c.Confidence,
+		Probe:         c.Probe,
+		Deduplicate:   c.Deduplicate,
+		AllowPrivate:  c.DangerousAllowPrivate,
+		Verbose:       c.Verbose,
+		MergeSlugs:    c.MergeSlugs,
+		SlugThreshold: c.SlugThreshold,
 	})
 	if err != nil {
 		return err
@@ -586,6 +590,8 @@ type ScanCmd struct {
 	Probe                 bool    `default:"true" help:"Enable endpoint probing"`
 	Deduplicate           bool    `default:"true" help:"Deduplicate classified endpoints before probing"`
 	DangerousAllowPrivate bool    `help:"Disable SSRF protection for crawling and probes, allowing private/localhost targets (localhost, 127.0.0.1, RFC1918, link-local). Required when the seed URL is a private host, otherwise the crawl exits with an error and captures nothing. WARNING: Do not use on production systems." name:"dangerous-allow-private"`
+	MergeSlugs            bool    `name:"merge-slugs" help:"Collapse sibling paths whose varying segment looks like content (a \"slug\") into one {slug} parameter. Off by default. USE IT when scanning slug-driven content where each path is the same endpoint with different data (e.g. a blog or CMS): /posts/hello-world,/posts/my-trip -> /posts/{postSlug}. LEAVE IT OFF when distinct path segments are distinct endpoints you don't want to lose (e.g. /feature/login,/feature/export stay separate). Note: numeric/UUID/hash IDs (/users/42) are always normalized regardless of this flag."`
+	SlugThreshold         int     `name:"slug-threshold" default:"2" help:"How many distinct values must appear at a path position before --merge-slugs collapses it into a {slug} parameter. Higher = more conservative (needs more samples before merging), which helps on sparse captures. Ignored unless --merge-slugs is set. Minimum 2."`
 
 	CrawlOptions
 }
@@ -684,12 +690,14 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	defer genStop()
 
 	spec, err := generateSpec(genCtx, requests, generateSpecOptions{
-		APIType:      apiType,
-		Confidence:   c.Confidence,
-		Probe:        c.Probe,
-		Deduplicate:  c.Deduplicate,
-		AllowPrivate: c.DangerousAllowPrivate,
-		Verbose:      c.Verbose,
+		APIType:       apiType,
+		Confidence:    c.Confidence,
+		Probe:         c.Probe,
+		Deduplicate:   c.Deduplicate,
+		AllowPrivate:  c.DangerousAllowPrivate,
+		Verbose:       c.Verbose,
+		MergeSlugs:    c.MergeSlugs,
+		SlugThreshold: c.SlugThreshold,
 	})
 	if err != nil {
 		return err
@@ -726,12 +734,14 @@ func main() {
 // generateSpecOptions holds parameters for generateSpec, avoiding consecutive
 // bool arguments that are easy to transpose at call sites.
 type generateSpecOptions struct {
-	APIType      string
-	Confidence   float64
-	Probe        bool
-	Deduplicate  bool
-	AllowPrivate bool
-	Verbose      bool
+	APIType       string
+	Confidence    float64
+	Probe         bool
+	Deduplicate   bool
+	AllowPrivate  bool
+	Verbose       bool
+	MergeSlugs    bool
+	SlugThreshold int
 }
 
 // augmentWithStaticForms appends synthetic ObservedRequests parsed from HTML
@@ -775,10 +785,13 @@ func augmentAll(ctx context.Context, requests []crawl.ObservedRequest, js jsAnal
 // observations AND JS-bundle static analysis — both ScanCmd and GenerateCmd
 // call augmentAll (which performs both stages in order) before invoking this
 // function.
-func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts generateSpecOptions) ([]byte, error) {
+func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts generateSpecOptions) ([]byte, error) { //nolint:gocyclo // classify → probe → generate orchestration
 	classifiers := classifiersForType(opts.APIType)
 	if classifiers == nil {
 		return nil, fmt.Errorf("unsupported API type: %q", opts.APIType)
+	}
+	if opts.MergeSlugs && opts.SlugThreshold < 2 {
+		return nil, fmt.Errorf("--slug-threshold must be >= 2")
 	}
 	classified := classify.RunClassifiers(classifiers, requests, opts.Confidence)
 	if opts.Deduplicate {
@@ -828,7 +841,7 @@ func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts ge
 		classified = enriched
 	}
 
-	gen, err := generate.Get(opts.APIType)
+	gen, err := generate.Get(opts.APIType, generate.Options{MergeSlugs: opts.MergeSlugs, SlugThreshold: opts.SlugThreshold})
 	if err != nil {
 		return nil, err
 	}

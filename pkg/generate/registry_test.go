@@ -34,7 +34,7 @@ func TestGet(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gen, err := Get(tt.apiType)
+			gen, err := Get(tt.apiType, Options{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Get(%q) error = %v, wantErr %v", tt.apiType, err, tt.wantErr)
 				return

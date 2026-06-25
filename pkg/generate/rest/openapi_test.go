@@ -531,7 +531,7 @@ func TestOpenAPIGenerator_SlugObservation(t *testing.T) {
 	// is wired into groupEndpoints; a regression that reverts the wiring to
 	// per-endpoint normalization would produce three distinct paths and fail
 	// this test.
-	gen := &OpenAPIGenerator{}
+	gen := &OpenAPIGenerator{MergeSlugs: true}
 
 	endpoints := []classify.ClassifiedRequest{
 		{

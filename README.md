@@ -155,6 +155,16 @@ vespasian scan https://app.example.com -v -o api.yaml
 vespasian --no-banner scan https://app.example.com -o api.yaml
 ```
 
+#### Path normalization & `--merge-slugs`
+
+IDs (numeric, UUID, hashes like `/users/42`) are always normalized to parameters regardless of flags. Observation-based "slug" merging is opt-in via `--merge-slugs` (off by default):
+
+- Feature routes (default, kept separate): `/feature/login`, `/feature/export` stay distinct (default behavior)
+- For Blog/CMS content, you should use `--merge-slugs`, which will produce: `/posts/hello-world`, `/posts/my-trip` → `/posts/{postSlug}`
+
+
+Optionally, when using `--merge-slug`, you can also configure `--slug-threshold` (default 2) to set how many distinct values must appear at a position before merging paths into a slug; higher is more conservative.
+
 ## Use Cases
 
 ### Penetration Testing without API Documentation

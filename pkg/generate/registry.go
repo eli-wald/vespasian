@@ -22,11 +22,21 @@ import (
 	"github.com/praetorian-inc/vespasian/pkg/generate/wsdl"
 )
 
+// Options configures spec generation. Only the REST/OpenAPI generator
+// consumes these today; wsdl and graphql ignore them.
+type Options struct {
+	// MergeSlugs enables observation-based slug merging in REST path normalization.
+	MergeSlugs bool
+	// SlugThreshold is the minimum distinct values at a path position before
+	// merging; clamped to >=2 downstream. Ignored unless MergeSlugs is set.
+	SlugThreshold int
+}
+
 // Get returns a SpecGenerator for the given API type.
-func Get(apiType string) (SpecGenerator, error) {
+func Get(apiType string, opts Options) (SpecGenerator, error) {
 	switch apiType {
 	case "rest":
-		return &rest.OpenAPIGenerator{}, nil
+		return &rest.OpenAPIGenerator{MergeSlugs: opts.MergeSlugs, SlugThreshold: opts.SlugThreshold}, nil
 	case "wsdl":
 		return &wsdl.Generator{}, nil
 	case "graphql":
