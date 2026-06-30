@@ -286,7 +286,7 @@ type CrawlOptions struct {
 
 // SlugOptions holds the path-normalization flags shared by GenerateCmd and ScanCmd.
 type SlugOptions struct {
-	MergeSlugs    bool `name:"merge-slugs" help:"Collapse sibling paths whose varying segment looks like content (a \"slug\") into one {slug} parameter. Off by default. USE IT when scanning slug-driven content where each path is the same endpoint with different data (e.g. a blog or CMS): /posts/hello-world,/posts/my-trip -> /posts/{postSlug}. LEAVE IT OFF when distinct path segments are distinct endpoints you don't want to lose (e.g. /feature/login,/feature/export stay separate). Note: numeric/UUID/hash IDs (/users/42) are always normalized regardless of this flag."`
+	MergeSlugs    bool `name:"merge-slugs" help:"Enable slug-based path merging (off by default). See README for when to use this vs. distinct endpoint preservation."`
 	SlugThreshold int  `name:"slug-threshold" default:"2" help:"How many distinct values must appear at a path position before --merge-slugs collapses it into a {slug} parameter. Higher = more conservative (needs more samples before merging), which helps on sparse captures. Ignored unless --merge-slugs is set. Minimum 2."`
 }
 
@@ -526,6 +526,10 @@ const maxCaptureSize = 100 * 1024 * 1024
 
 // Run executes the generate command.
 func (c *GenerateCmd) Run() (err error) {
+	if err := validateSlugThreshold(c.APIType, c.MergeSlugs, c.SlugThreshold); err != nil {
+		return err
+	}
+
 	f, err := os.Open(c.Capture)
 	if err != nil {
 		return fmt.Errorf("open capture file: %w", err)
@@ -604,6 +608,10 @@ type ScanCmd struct {
 // Run executes the scan command (crawl + generate pipeline).
 func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	if err := validateURL(c.URL); err != nil {
+		return err
+	}
+
+	if err := validateSlugThreshold(c.APIType, c.MergeSlugs, c.SlugThreshold); err != nil {
 		return err
 	}
 
@@ -785,6 +793,21 @@ func augmentAll(ctx context.Context, requests []crawl.ObservedRequest, js jsAnal
 	return requests
 }
 
+// validateSlugThreshold rejects --slug-threshold < 2 when --merge-slugs is on.
+// wsdl/graphql ignore slug options, so they are exempt to avoid a misleading
+// error. Called early in GenerateCmd.Run and ScanCmd.Run so the crawl/file I/O
+// never starts on an invalid flag combination, and again inside generateSpec to
+// cover direct callers.
+func validateSlugThreshold(apiType string, mergeSlugs bool, slugThreshold int) error {
+	if apiType == apiTypeWSDL || apiType == apiTypeGraphQL {
+		return nil
+	}
+	if mergeSlugs && slugThreshold < 2 {
+		return fmt.Errorf("--slug-threshold must be >= 2")
+	}
+	return nil
+}
+
 // generateSpec runs the classify → probe → generate pipeline. It trusts its
 // caller to have already augmented requests with static-HTML form
 // observations AND JS-bundle static analysis — both ScanCmd and GenerateCmd
@@ -795,10 +818,10 @@ func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts ge
 	if classifiers == nil {
 		return nil, fmt.Errorf("unsupported API type: %q", opts.APIType)
 	}
-	// Reject <2 loudly at the CLI boundary; the rest package additionally
-	// clamps <2 to 2 defensively for non-CLI callers of NormalizeOptions.
-	if opts.MergeSlugs && opts.SlugThreshold < 2 {
-		return nil, fmt.Errorf("--slug-threshold must be >= 2")
+	// REST-scoped: wsdl/graphql ignore slug options (see validateSlugThreshold).
+	// The rest package additionally clamps <2 to 2 for non-CLI callers.
+	if err := validateSlugThreshold(opts.APIType, opts.MergeSlugs, opts.SlugThreshold); err != nil {
+		return nil, err
 	}
 	classified := classify.RunClassifiers(classifiers, requests, opts.Confidence)
 	if opts.Deduplicate {

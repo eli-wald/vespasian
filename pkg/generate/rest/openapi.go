@@ -96,7 +96,8 @@ type OpenAPIGenerator struct {
 	// normalization (see NormalizeOptions). Off by default.
 	MergeSlugs bool
 	// SlugThreshold is the minimum distinct values at a path position before
-	// promotion; clamped to >=2 downstream. Ignored unless MergeSlugs is set.
+	// promotion. The zero value (0) is treated as 2: NormalizePathsWithNames
+	// clamps any value < 2 up to 2. Ignored unless MergeSlugs is set.
 	SlugThreshold int
 }
 

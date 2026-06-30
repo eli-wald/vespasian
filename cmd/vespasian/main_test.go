@@ -35,9 +35,8 @@ import (
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
 )
 
-// siblingSlugRequests returns two sibling REST requests whose only varying
-// path segment looks like a content slug. Default normalization keeps both
-// paths; --merge-slugs collapses them to /api/posts/{postSlug}.
+// jsonGetRequest builds a minimal GET ObservedRequest for the given URL with a
+// JSON response.
 func jsonGetRequest(url string) crawl.ObservedRequest {
 	return crawl.ObservedRequest{
 		Method:  "GET",
@@ -50,6 +49,9 @@ func jsonGetRequest(url string) crawl.ObservedRequest {
 	}
 }
 
+// siblingSlugRequests returns two sibling REST requests whose only varying
+// path segment looks like a content slug. Default normalization keeps both
+// paths; --merge-slugs collapses them to /api/posts/{postSlug}.
 func siblingSlugRequests() []crawl.ObservedRequest {
 	return []crawl.ObservedRequest{
 		jsonGetRequest("https://example.com/api/posts/hello-world"),
@@ -74,7 +76,7 @@ func TestGenerateSpec_SlugThresholdValidation(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "--slug-threshold must be >= 2")
 
-	_, err = generateSpec(context.Background(), requests, generateSpecOptions{
+	off, err := generateSpec(context.Background(), requests, generateSpecOptions{
 		APIType:       "rest",
 		Confidence:    0.5,
 		Probe:         false,
@@ -83,6 +85,11 @@ func TestGenerateSpec_SlugThresholdValidation(t *testing.T) {
 		SlugThreshold: 1,
 	})
 	require.NoError(t, err)
+	// threshold=1 is ignored when merging is off: both siblings survive, no collapse.
+	offStr := string(off)
+	require.Contains(t, offStr, "/api/posts/hello-world")
+	require.Contains(t, offStr, "/api/posts/my-trip")
+	require.NotContains(t, offStr, "{postSlug}")
 }
 
 // TestGenerateSpec_MergeSlugsWiring proves the --merge-slugs flag flows
@@ -123,6 +130,7 @@ func TestGenerateSpec_MergeSlugsWiring(t *testing.T) {
 	require.Contains(t, onStr, "/api/posts/{postSlug}")
 	require.NotContains(t, onStr, "/api/posts/hello-world")
 	require.NotContains(t, onStr, "/api/posts/my-trip")
+	require.Contains(t, onStr, "/api/users/{userId}")
 }
 
 func TestValidateURL(t *testing.T) {
