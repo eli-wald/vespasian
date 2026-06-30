@@ -159,9 +159,8 @@ vespasian --no-banner scan https://app.example.com -o api.yaml
 
 IDs (numeric, UUID, hashes like `/users/42`) are always normalized to parameters regardless of flags. Observation-based "slug" merging is opt-in via `--merge-slugs` (off by default):
 
-- Feature routes (default, kept separate): `/feature/login`, `/feature/export` stay distinct (default behavior)
-- For Blog/CMS content, you should use `--merge-slugs`, which will produce: `/posts/hello-world`, `/posts/my-trip` → `/posts/{postSlug}`
-
+- Feature routes (default): `/feature/login`, `/feature/export` stay distinct.
+- Blog/CMS content (use `--merge-slugs`): `/posts/hello-world`, `/posts/my-trip` → `/posts/{postSlug}`
 
 Optionally, when using `--merge-slugs`, you can also configure `--slug-threshold` (default 2) to set how many distinct values must appear at a position before merging paths into a slug; higher is more conservative.
 

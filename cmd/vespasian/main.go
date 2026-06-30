@@ -284,6 +284,12 @@ type CrawlOptions struct {
 	FetchSourcemaps bool          `name:"fetch-sourcemaps" default:"true"  help:"When --analyze-js is set, fetch .js.map sourcemaps referenced via //# sourceMappingURL= comments to recover original sources."`
 }
 
+// SlugOptions holds the path-normalization flags shared by GenerateCmd and ScanCmd.
+type SlugOptions struct {
+	MergeSlugs    bool `name:"merge-slugs" help:"Collapse sibling paths whose varying segment looks like content (a \"slug\") into one {slug} parameter. Off by default. USE IT when scanning slug-driven content where each path is the same endpoint with different data (e.g. a blog or CMS): /posts/hello-world,/posts/my-trip -> /posts/{postSlug}. LEAVE IT OFF when distinct path segments are distinct endpoints you don't want to lose (e.g. /feature/login,/feature/export stay separate). Note: numeric/UUID/hash IDs (/users/42) are always normalized regardless of this flag."`
+	SlugThreshold int  `name:"slug-threshold" default:"2" help:"How many distinct values must appear at a path position before --merge-slugs collapses it into a {slug} parameter. Higher = more conservative (needs more samples before merging), which helps on sparse captures. Ignored unless --merge-slugs is set. Minimum 2."`
+}
+
 // setupForceExitHandler spawns a goroutine that waits for the first signal
 // to be handled (ctx.Done), then registers for a second SIGINT/SIGTERM and
 // force-exits the process. This avoids a race where both the graceful handler
@@ -503,8 +509,8 @@ type GenerateCmd struct {
 	Verbose               bool    `short:"v" help:"Enable verbose logging"`
 	AnalyzeJS             bool    `name:"analyze-js"       default:"true"  help:"Statically analyze JS bundles in the imported capture (when present)."`
 	FetchSourcemaps       bool    `name:"fetch-sourcemaps" default:"false" help:"When --analyze-js is set, fetch .js.map sourcemaps referenced via //# sourceMappingURL= comments. Default false on generate (offline-friendly)."`
-	MergeSlugs            bool    `name:"merge-slugs" help:"Collapse sibling paths whose varying segment looks like content (a \"slug\") into one {slug} parameter. Off by default. USE IT when scanning slug-driven content where each path is the same endpoint with different data (e.g. a blog or CMS): /posts/hello-world,/posts/my-trip -> /posts/{postSlug}. LEAVE IT OFF when distinct path segments are distinct endpoints you don't want to lose (e.g. /feature/login,/feature/export stay separate). Note: numeric/UUID/hash IDs (/users/42) are always normalized regardless of this flag."`
-	SlugThreshold         int     `name:"slug-threshold" default:"2" help:"How many distinct values must appear at a path position before --merge-slugs collapses it into a {slug} parameter. Higher = more conservative (needs more samples before merging), which helps on sparse captures. Ignored unless --merge-slugs is set. Minimum 2."`
+
+	SlugOptions
 }
 
 // API type constants used for classification routing and generation.
@@ -590,10 +596,9 @@ type ScanCmd struct {
 	Probe                 bool    `default:"true" help:"Enable endpoint probing"`
 	Deduplicate           bool    `default:"true" help:"Deduplicate classified endpoints before probing"`
 	DangerousAllowPrivate bool    `help:"Disable SSRF protection for crawling and probes, allowing private/localhost targets (localhost, 127.0.0.1, RFC1918, link-local). Required when the seed URL is a private host, otherwise the crawl exits with an error and captures nothing. WARNING: Do not use on production systems." name:"dangerous-allow-private"`
-	MergeSlugs            bool    `name:"merge-slugs" help:"Collapse sibling paths whose varying segment looks like content (a \"slug\") into one {slug} parameter. Off by default. USE IT when scanning slug-driven content where each path is the same endpoint with different data (e.g. a blog or CMS): /posts/hello-world,/posts/my-trip -> /posts/{postSlug}. LEAVE IT OFF when distinct path segments are distinct endpoints you don't want to lose (e.g. /feature/login,/feature/export stay separate). Note: numeric/UUID/hash IDs (/users/42) are always normalized regardless of this flag."`
-	SlugThreshold         int     `name:"slug-threshold" default:"2" help:"How many distinct values must appear at a path position before --merge-slugs collapses it into a {slug} parameter. Higher = more conservative (needs more samples before merging), which helps on sparse captures. Ignored unless --merge-slugs is set. Minimum 2."`
 
 	CrawlOptions
+	SlugOptions
 }
 
 // Run executes the scan command (crawl + generate pipeline).
@@ -790,6 +795,8 @@ func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts ge
 	if classifiers == nil {
 		return nil, fmt.Errorf("unsupported API type: %q", opts.APIType)
 	}
+	// Reject <2 loudly at the CLI boundary; the rest package additionally
+	// clamps <2 to 2 defensively for non-CLI callers of NormalizeOptions.
 	if opts.MergeSlugs && opts.SlugThreshold < 2 {
 		return nil, fmt.Errorf("--slug-threshold must be >= 2")
 	}
