@@ -114,6 +114,7 @@ func TestGenerateSpec_MergeSlugsWiring(t *testing.T) {
 	onStr := string(on)
 	require.Contains(t, onStr, "/api/posts/{postSlug}")
 	require.NotContains(t, onStr, "/api/posts/hello-world")
+	require.NotContains(t, onStr, "/api/posts/my-trip")
 }
 
 func TestValidateURL(t *testing.T) {
