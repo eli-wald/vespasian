@@ -181,18 +181,20 @@ func TestGenerateCmdRun_RejectsSlugThresholdBeforeFileIO(t *testing.T) {
 }
 
 // TestScanCmdRun_RejectsSlugThresholdBeforeCrawl proves the slug-threshold
-// guard fires before any browser/crawl. The URL is valid, so validateURL
-// passes; a valid URL ordered after the crawl would attempt a real crawl
-// instead of returning the slug error fast.
+// guard fires before any browser/crawl. A malformed header would make
+// setupBrowserAndSignals (which runs AFTER the guard, before the crawl) fail
+// with a distinct "invalid header" error; asserting the error is EXACTLY the
+// slug error proves the guard short-circuited first. If the early guard were
+// removed, the header error would surface instead. No network/Chrome needed.
 func TestScanCmdRun_RejectsSlugThresholdBeforeCrawl(t *testing.T) {
 	cmd := &ScanCmd{
-		URL:         "https://example.com",
-		APIType:     apiTypeAuto,
-		SlugOptions: SlugOptions{MergeSlugs: true, SlugThreshold: 1},
+		URL:          "https://example.com",
+		APIType:      apiTypeAuto,
+		CrawlOptions: CrawlOptions{Header: []string{"no-colon-header"}},
+		SlugOptions:  SlugOptions{MergeSlugs: true, SlugThreshold: 1},
 	}
 	err := cmd.Run()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "--slug-threshold must be >= 2")
+	require.EqualError(t, err, "--slug-threshold must be >= 2")
 }
 
 func TestValidateURL(t *testing.T) {
