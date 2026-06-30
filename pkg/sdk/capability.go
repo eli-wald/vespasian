@@ -122,6 +122,9 @@ func (c *Capability) Invoke(ctx capability.ExecutionContext, input capmodel.WebA
 
 	start := time.Now()
 
+	// TODO: propagate ctx from ExecutionContext once capability-sdk exposes a
+	// context.Context (see doc.go). Until then the crawl and JS-analysis phases
+	// run on context.Background() and cannot be canceled cooperatively.
 	requests, err := crawlFunc(context.Background(), opts, input.PrimaryURL)
 	if err != nil {
 		return fmt.Errorf("vespasian: crawl failed: %w", err)
@@ -179,6 +182,10 @@ func (c *Capability) runScan(ctx capability.ExecutionContext, requests []crawl.O
 	// success. Gated by the probe flag; SSRF protection stays on (allowPrivate
 	// is forced false). SOAP services often return HTML for browser GETs, so
 	// active probing is the reliable discovery method.
+	//
+	// TODO: propagate ctx from ExecutionContext once capability-sdk exposes a
+	// context.Context (see doc.go) — wsdlResolveFunc and ClassifyProbeGenerate
+	// below run on context.Background() and cannot be canceled cooperatively.
 	requests, apiType, _ = wsdlResolveFunc(context.Background(), input.PrimaryURL, apiType, requests, probeEnabled, false, nil)
 
 	spec, err := pipeline.ClassifyProbeGenerate(context.Background(), requests, pipeline.Options{
@@ -390,7 +397,8 @@ func toMultiValueHeaders(headers map[string]string) map[string][]string {
 // parseHeaders parses a comma-separated "Key: Value, K2: V2" string. Whitespace
 // around keys and values is trimmed. Each entry is validated via crawl.ParseHeader
 // (RFC 7230 names; no CR/LF/NUL in values). Header values containing commas are
-// not supported — the value will be split at the first comma.
+// not supported — the comma-split produces a malformed token that
+// crawl.ParseHeader rejects with an error.
 func parseHeaders(raw string) (map[string]string, error) {
 	if raw == "" {
 		return nil, nil

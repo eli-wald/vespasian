@@ -611,6 +611,12 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	genCtx, genStop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer genStop()
 
+	// Emit the SSRF-disabled warning before any active probing so the notice
+	// always precedes outbound requests to private/internal networks. The WSDL
+	// probe below is the first such activity in the scan phase, so the warning
+	// must come first (matching GenerateCmd.Run, which warns before probing).
+	warnSSRFDisabled(c.DangerousAllowPrivate, c.Probe)
+
 	// When the resolved API type is WSDL or REST, try fetching a WSDL document
 	// from <targetURL>?wsdl. SOAP services return HTML for browser GETs so
 	// crawl traffic rarely contains WSDL signals — active probing is the
@@ -624,8 +630,6 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	if c.Verbose {
 		fmt.Fprintf(os.Stderr, "generating %s spec\n", apiTypeDisplayName(apiType)) //nolint:gosec // G705: writing to stderr, not web response
 	}
-
-	warnSSRFDisabled(c.DangerousAllowPrivate, c.Probe)
 
 	// Replay JS-extracted URLs with raw HTTP to bypass SPA catch-all routing.
 	// URLs extracted from JavaScript bundles are visited by the headless browser,
