@@ -82,6 +82,8 @@ func (c *GRPCClassifier) ClassifyDetail(req crawl.ObservedRequest) (bool, float6
 
 	hasPath := false
 	if strings.EqualFold(req.Method, "POST") {
+		// A malformed URL just skips the path-shape heuristic (fail-open, no
+		// confidence penalty) — content-type/trailer signals still apply.
 		if parsed, err := url.Parse(req.URL); err == nil && grpcPathRE.MatchString(parsed.Path) {
 			signals = append(signals, "grpc-path-shape")
 			hasPath = true

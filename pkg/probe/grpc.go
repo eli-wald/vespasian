@@ -39,6 +39,16 @@ import (
 // nested import graphs.
 const maxGRPCFileDescriptors = 1000
 
+// maxReflectionRecvBytes caps a single reflection response message. Set
+// explicitly (rather than relying on gRPC's 4 MiB default) so per-message
+// memory from a hostile target is intentional and visible.
+const maxReflectionRecvBytes = 4 << 20 // 4 MiB
+
+// maxGRPCDescriptorBytes caps the aggregate serialized descriptor bytes
+// retained per target, bounding total memory even when many files stay
+// under the file-count cap. Guards against reflection memory-amplification.
+const maxGRPCDescriptorBytes = 64 << 20 // 64 MiB
+
 // reflectionServices are the gRPC reflection service names themselves; filtered
 // out of the discovered service list since they describe the reflection API,
 // not the user-facing services we want to enumerate.
@@ -231,6 +241,7 @@ func (p *GRPCProbe) dialGRPC(t grpcTargetInfo) (*grpc.ClientConn, error) {
 	return grpc.NewClient(t.hostPort,
 		grpc.WithTransportCredentials(creds),
 		grpc.WithContextDialer(dialer),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxReflectionRecvBytes)),
 	)
 }
 
@@ -259,6 +270,7 @@ func runReflection(ctx context.Context, client *grpcreflect.Client, t grpcTarget
 		FileDescriptors:   map[string][]byte{},
 	}
 	fetched := map[string]bool{}
+	totalBytes := 0
 
 	for _, svcName := range services {
 		if reflectionServices[svcName] {
@@ -269,7 +281,7 @@ func runReflection(ctx context.Context, client *grpcreflect.Client, t grpcTarget
 			slog.DebugContext(ctx, "grpc probe: FileContainingSymbol failed", "service", svcName, "error", err)
 			continue
 		}
-		walkFileDescriptors(fd, fetched, result.FileDescriptors)
+		walkFileDescriptors(fd, fetched, result.FileDescriptors, &totalBytes)
 
 		if gs, ok := extractService(fd, svcName); ok {
 			result.Services = append(result.Services, gs)
@@ -280,10 +292,11 @@ func runReflection(ctx context.Context, client *grpcreflect.Client, t grpcTarget
 }
 
 // walkFileDescriptors recursively serializes fd and its transitive
-// dependencies into the output map, keyed by .proto filename. Bounded by
-// maxGRPCFileDescriptors.
-func walkFileDescriptors(fd *desc.FileDescriptor, fetched map[string]bool, out map[string][]byte) {
-	if fd == nil || len(fetched) >= maxGRPCFileDescriptors {
+// dependencies into out, keyed by .proto filename. Bounded by both
+// maxGRPCFileDescriptors (count) and maxGRPCDescriptorBytes (aggregate
+// serialized bytes) to cap memory from hostile reflection responses.
+func walkFileDescriptors(fd *desc.FileDescriptor, fetched map[string]bool, out map[string][]byte, totalBytes *int) {
+	if fd == nil || len(fetched) >= maxGRPCFileDescriptors || *totalBytes >= maxGRPCDescriptorBytes {
 		return
 	}
 	name := fd.GetName()
@@ -292,12 +305,18 @@ func walkFileDescriptors(fd *desc.FileDescriptor, fetched map[string]bool, out m
 	}
 	fetched[name] = true
 
-	if raw, err := proto.Marshal(fd.AsFileDescriptorProto()); err == nil {
+	// QUAL-002: a marshal failure intentionally omits this one descriptor
+	// (non-fatal — buildDescriptorGraph degrades downstream); log so the
+	// root cause isn't invisible.
+	if raw, err := proto.Marshal(fd.AsFileDescriptorProto()); err != nil {
+		slog.Debug("grpc probe: marshal file descriptor failed; omitting", "file", name, "error", err)
+	} else {
 		out[name] = raw
+		*totalBytes += len(raw)
 	}
 
 	for _, dep := range fd.GetDependencies() {
-		walkFileDescriptors(dep, fetched, out)
+		walkFileDescriptors(dep, fetched, out, totalBytes)
 	}
 }
 

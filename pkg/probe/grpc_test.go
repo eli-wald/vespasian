@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"testing"
@@ -39,6 +40,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/praetorian-inc/vespasian/pkg/classify"
+	"github.com/praetorian-inc/vespasian/test/grpc-server/labpb"
 )
 
 // startTestGRPCServer brings up an in-process gRPC server on 127.0.0.1:0
@@ -439,6 +441,72 @@ func TestGRPCProbe_Probe_TLSVerifiedByDefault(t *testing.T) {
 	// Self-signed cert fails verification: schema must be nil, documenting
 	// that the server was not enumerated.
 	assert.Nil(t, result[0].GRPCSchema, "self-signed cert must block enumeration when GRPCInsecureSkipVerify is false")
+}
+
+// TestGRPCProbe_Probe_DiscoversServerStreaming pins the ServerStreaming==true
+// branch of extractService. It starts an in-process gRPC server with the
+// lab.v1.UserService registered (which has a server-streaming ListUsers RPC)
+// and asserts that the probe correctly reports ServerStreaming=true and
+// ClientStreaming=false for that method.
+func TestGRPCProbe_Probe_DiscoversServerStreaming(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	s := grpc.NewServer()
+	labpb.RegisterUserServiceServer(s, labpb.UnimplementedUserServiceServer{})
+	reflection.Register(s)
+	go func() {
+		_ = s.Serve(lis)
+	}()
+	defer s.Stop()
+
+	port := lis.Addr().(*net.TCPAddr).Port
+
+	cfg := Config{
+		Timeout:      5 * time.Second,
+		URLValidator: func(string) error { return nil },
+		Dialer:       loopbackDialer,
+	}
+	probe := NewGRPCProbe(cfg)
+
+	endpoints := []classify.ClassifiedRequest{
+		{APIType: "grpc"},
+	}
+	endpoints[0].URL = fmt.Sprintf("http://127.0.0.1:%d/lab.v1.UserService/ListUsers", port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := probe.Probe(ctx, endpoints)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+
+	schema := result[0].GRPCSchema
+	require.NotNil(t, schema, "GRPCSchema should be populated")
+	require.True(t, schema.ReflectionEnabled, "reflection must be enabled")
+
+	// Locate the lab.v1.UserService in the discovered services.
+	var userSvc *classify.GRPCService
+	for i, svc := range schema.Services {
+		if svc.Name == "lab.v1.UserService" {
+			userSvc = &schema.Services[i]
+			break
+		}
+	}
+	require.NotNil(t, userSvc, "expected lab.v1.UserService in discovered services")
+
+	// Locate the ListUsers method on the service.
+	var listUsersMethod *classify.GRPCMethod
+	for i, m := range userSvc.Methods {
+		if m.Name == "ListUsers" {
+			listUsersMethod = &userSvc.Methods[i]
+			break
+		}
+	}
+	require.NotNil(t, listUsersMethod, "expected ListUsers method on lab.v1.UserService")
+
+	assert.True(t, listUsersMethod.ServerStreaming, "ListUsers must have ServerStreaming=true")
+	assert.False(t, listUsersMethod.ClientStreaming, "ListUsers must have ClientStreaming=false (unary client side)")
 }
 
 func TestGRPCTarget(t *testing.T) {
