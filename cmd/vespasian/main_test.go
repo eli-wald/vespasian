@@ -28,11 +28,93 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
 	"github.com/praetorian-inc/vespasian/pkg/analyze"
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
 )
+
+// siblingSlugRequests returns two sibling REST requests whose only varying
+// path segment looks like a content slug. Default normalization keeps both
+// paths; --merge-slugs collapses them to /api/posts/{postSlug}.
+func siblingSlugRequests() []crawl.ObservedRequest {
+	mk := func(url string) crawl.ObservedRequest {
+		return crawl.ObservedRequest{
+			Method:  "GET",
+			URL:     url,
+			Headers: map[string]string{"Content-Type": "application/json"},
+			Response: crawl.ObservedResponse{
+				StatusCode:  200,
+				ContentType: "application/json",
+			},
+		}
+	}
+	return []crawl.ObservedRequest{
+		mk("https://example.com/api/posts/hello-world"),
+		mk("https://example.com/api/posts/my-trip"),
+	}
+}
+
+// TestGenerateSpec_SlugThresholdValidation covers the CLI-boundary guard in
+// generateSpec: --slug-threshold < 2 is rejected when merging is on, and
+// ignored when merging is off.
+func TestGenerateSpec_SlugThresholdValidation(t *testing.T) {
+	requests := siblingSlugRequests()
+
+	_, err := generateSpec(context.Background(), requests, generateSpecOptions{
+		APIType:       "rest",
+		Confidence:    0.5,
+		Probe:         false,
+		Deduplicate:   true,
+		MergeSlugs:    true,
+		SlugThreshold: 1,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--slug-threshold must be >= 2")
+
+	_, err = generateSpec(context.Background(), requests, generateSpecOptions{
+		APIType:       "rest",
+		Confidence:    0.5,
+		Probe:         false,
+		Deduplicate:   true,
+		MergeSlugs:    false,
+		SlugThreshold: 1,
+	})
+	require.NoError(t, err)
+}
+
+// TestGenerateSpec_MergeSlugsWiring proves the --merge-slugs flag flows
+// cmd -> generateSpec -> GetWithOptions -> generator and changes the output.
+func TestGenerateSpec_MergeSlugsWiring(t *testing.T) {
+	requests := siblingSlugRequests()
+
+	off, err := generateSpec(context.Background(), requests, generateSpecOptions{
+		APIType:     "rest",
+		Confidence:  0.5,
+		Probe:       false,
+		Deduplicate: true,
+		MergeSlugs:  false,
+	})
+	require.NoError(t, err)
+	offStr := string(off)
+	require.Contains(t, offStr, "/api/posts/hello-world")
+	require.Contains(t, offStr, "/api/posts/my-trip")
+	require.NotContains(t, offStr, "{postSlug}")
+
+	on, err := generateSpec(context.Background(), requests, generateSpecOptions{
+		APIType:       "rest",
+		Confidence:    0.5,
+		Probe:         false,
+		Deduplicate:   true,
+		MergeSlugs:    true,
+		SlugThreshold: 2,
+	})
+	require.NoError(t, err)
+	onStr := string(on)
+	require.Contains(t, onStr, "/api/posts/{postSlug}")
+	require.NotContains(t, onStr, "/api/posts/hello-world")
+}
 
 func TestValidateURL(t *testing.T) {
 	tests := []struct {

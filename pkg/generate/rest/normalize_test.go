@@ -1237,3 +1237,12 @@ func TestNormalizePathsWithNames_SlugThreshold(t *testing.T) {
 	got = NormalizePathsWithNames(threeVals, NormalizeOptions{MergeSlugs: true, SlugThreshold: 3})
 	require.Equal(t, "/posts/{postSlug}", got["/posts/a"], "3 values must merge at threshold 3")
 }
+
+// TestNormalizePathsWithNames_SlugThresholdClamped verifies the defensive
+// SlugThreshold < 2 clamp inside NormalizePathsWithNames: a threshold of 1
+// must behave as 2, so two distinct values still merge.
+func TestNormalizePathsWithNames_SlugThresholdClamped(t *testing.T) {
+	got := NormalizePathsWithNames([]string{"/posts/a", "/posts/b"}, NormalizeOptions{MergeSlugs: true, SlugThreshold: 1})
+	require.Equal(t, "/posts/{postSlug}", got["/posts/a"])
+	require.Equal(t, "/posts/{postSlug}", got["/posts/b"])
+}
