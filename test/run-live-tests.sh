@@ -98,6 +98,11 @@ preflight_test_host() {
             _probe_target_host "${GRAPHQL_SERVER_PORT:-}" "/" "graphql-server" || failed=1
             ;;
     esac
+    case ",${targets}," in
+        *,concat-spa,*)
+            _probe_target_host "${CONCAT_SPA_PORT:-}" "/healthz" "concat-spa" || failed=1
+            ;;
+    esac
     [ $failed -eq 0 ] && return 0
     if [ "$TEST_HOST" = "localhost" ]; then
         log_info "Is ./test/setup-live-targets.sh running? Check the failing URL on this host."
@@ -164,6 +169,33 @@ with open(sys.argv[1]) as f:
 PYEOF
 }
 
+# crawl_backend runs one crawl with an explicit --headless value and writes
+# output to <out>. Only the backend-invariant flags (--headless,
+# --dangerous-allow-private) are fixed here; the caller passes --depth,
+# --max-pages, --timeout, etc. so there are no duplicated/overridden flags.
+# Usage: crawl_backend <base_url> <out_capture> <headless:true|false> <crawl flags...>
+crawl_backend() {
+    local base_url=$1 out=$2 headless=$3; shift 3
+    "$VESPASIAN" crawl "$base_url" -o "$out" \
+        --headless="$headless" \
+        --dangerous-allow-private "$@" 2>&1
+}
+
+# chrome_available returns 0 if Chrome is likely reachable, 1 otherwise.
+# This is a best-effort shell heuristic (binary presence or rod's cached
+# Chromium directory) and may diverge from the Go skipIfNoChrome probe, which
+# actually attempts to launch a headless browser via NewBrowserManager. A false
+# positive here (chrome_available returns 0 but Chrome fails to launch) degrades
+# to a log_warn + skip, never a hard failure. A false negative causes the rod
+# backend to be skipped even when Chrome is present; re-run with an explicit
+# Chrome binary on PATH if rod skips unexpectedly.
+chrome_available() {
+    command -v google-chrome >/dev/null 2>&1 || \
+    command -v chromium >/dev/null 2>&1 || \
+    command -v chromium-browser >/dev/null 2>&1 || \
+    [ -d "$HOME/.cache/rod/browser" ]
+}
+
 # ──────────────────────────────────────────────────────────────
 # Test functions
 # ──────────────────────────────────────────────────────────────
@@ -187,26 +219,40 @@ test_rest_api() {
 
     log_header "Testing: rest-api (${base_url})"
 
-    # Step 1: Crawl
-    log_info "Crawling ${base_url}..."
-    if ! "$VESPASIAN" crawl "$base_url" \
-        -o "$capture_file" \
-        --depth 2 \
-        --max-pages 50 \
-        --timeout 2m \
-        --dangerous-allow-private \
-        $verbose_flag 2>&1; then
-        log_fail "Crawl failed"
-        set_test_result "rest-api" "FAIL" "?" "?" "$((SECONDS - start))"
-        return 1
-    fi
+    # Step 1: Crawl — both backends (http and rod).
+    # The http backend (headless=false) is the primary capture used downstream
+    # for spec generation. The rod backend (headless=true) adds a parity check.
+    for hl in false true; do
+        local cap="${target_dir}/capture-${hl}.json"
+        if [ "$hl" = "true" ]; then
+            if ! chrome_available; then
+                log_warn "rest-api[headless=true]: Chrome unavailable, skipping rod backend"
+                continue
+            fi
+        fi
+        log_info "Crawling ${base_url} (headless=${hl})..."
+        if ! crawl_backend "$base_url" "$cap" "$hl" --depth 2 --max-pages 50 --timeout 2m $verbose_flag; then
+            if [ "$hl" = "true" ]; then
+                # Rod crawl failure degrades gracefully — Chrome may be unlaunchable.
+                log_warn "rest-api[headless=true]: crawl failed (Chrome may be unlaunchable), skipping rod backend"
+                continue
+            fi
+            log_fail "Crawl failed (headless=${hl})"
+            set_test_result "rest-api" "FAIL" "?" "?" "$((SECONDS - start))"
+            return 1
+        fi
+        local n; n=$(json_len "$cap")
+        log_info "rest-api[headless=${hl}]: ${n} requests captured"
+        if ! validate_capture "$cap" 3; then
+            failures=$((failures + 1))
+        fi
+    done
 
-    # Step 2: Validate capture
-    if ! validate_capture "$capture_file" 3; then
-        failures=$((failures + 1))
-    fi
+    # Use the http capture for spec generation (primary artifact). Copy
+    # unconditionally so a stale capture.json from a prior run is never used.
+    cp "${target_dir}/capture-false.json" "$capture_file" 2>/dev/null || true
 
-    # Step 3: Generate OpenAPI spec
+    # Step 2: Generate OpenAPI spec from http capture
     log_info "Generating OpenAPI spec..."
     if ! "$VESPASIAN" generate rest "$capture_file" \
         -o "$spec_file" \
@@ -217,7 +263,7 @@ test_rest_api() {
         return 1
     fi
 
-    # Step 4: Validate spec
+    # Step 3: Validate spec
     if ! validate_openapi_structure "$spec_file"; then
         failures=$((failures + 1))
     fi
@@ -246,6 +292,101 @@ test_rest_api() {
     else
         set_test_result "rest-api" "FAIL" "$endpoint_count" "$expected_count" "$duration"
         log_fail "rest-api: ${failures} check(s) failed (${duration}s)"
+    fi
+}
+
+test_concat_spa() {
+    local port="${CONCAT_SPA_PORT:-8993}"
+    local base_url="http://${TEST_HOST}:${port}"
+    local target_dir="${RESULTS_DIR}/concat-spa"
+    local spec_file="${target_dir}/spec.yaml"
+    local expected="${SCRIPT_DIR}/concat-spa/expected-paths.json"
+    local verbose_flag=""
+
+    [ "${VERBOSE:-false}" = true ] && verbose_flag="-v"
+
+    mkdir -p "$target_dir"
+    init_test_status "concat-spa"
+
+    local start=$SECONDS
+    local failures=0
+
+    log_header "Testing: concat-spa (${base_url})"
+
+    # Single-stage scan (NOT the two-stage crawl+generate the other targets
+    # use). The LAB-1368 concat extraction lives in the post-crawl JS-replay
+    # step (ReplayJSExtracted), which is invoked ONLY by `scan` — `crawl`
+    # produces a passive browser capture without ever running JS-replay, so
+    # the concat-derived endpoints would never enter the capture. The other
+    # live targets pass with `crawl` because their endpoints are href-linked
+    # and the browser captures them directly; concat-spa's endpoints exist
+    # only via concat() / +-string expressions in app.js, which only
+    # JS-replay discovers.
+    log_info "Scanning ${base_url} (single-stage: crawl + JS-replay + generate)..."
+    if ! "$VESPASIAN" scan "$base_url" \
+        -o "$spec_file" \
+        --api-type rest \
+        --depth 2 \
+        --max-pages 50 \
+        --timeout 2m \
+        --dangerous-allow-private \
+        $verbose_flag 2>&1; then
+        log_fail "Scan failed"
+        set_test_result "concat-spa" "FAIL" "?" "?" "$((SECONDS - start))"
+        return 1
+    fi
+
+    # Validate spec. Three layers make this a real 404-filter
+    # regression guard, not just a "did we find the endpoints" check:
+    #   (a) validate_path_coverage  — the two concat endpoints are PRESENT
+    #       (proves Strategy-5 discovery reached the spec);
+    #   (b) exact-count assertion   — the spec has EXACTLY total_paths (2),
+    #       so nothing extra leaked;
+    #   (c) validate_paths_absent   — the receiver literals (/api/users,
+    #       /api/products) and the 404 control (/api/missing) are explicitly
+    #       NOT present, with a precise message if the 404 filter regresses.
+    # (b)+(c) together enforce the "must NOT appear" half of the contract that
+    # the previous version only documented but never checked.
+    #
+    # Strategy provenance — that these paths came from the concat extractor
+    # specifically rather than another strategy — is owned by the in-process
+    # mutation test TestReplayJSExtracted_ConcatStyle_EndToEnd. This live
+    # target proves the integrated binary + Chrome-crawl pipeline discovers
+    # them end-to-end.
+    if ! validate_openapi_structure "$spec_file"; then
+        failures=$((failures + 1))
+    fi
+    if ! validate_path_coverage "$spec_file" "$expected"; then
+        failures=$((failures + 1))
+    fi
+    if ! validate_no_static_assets "$spec_file"; then
+        failures=$((failures + 1))
+    fi
+    # /api/users and /api/products are EXACT (bare receiver literals that must
+    # not survive); /api/missing/ is a SUBTREE (the 404 control endpoint).
+    if ! validate_paths_absent "$spec_file" "/api/users" "/api/products" "/api/missing/"; then
+        failures=$((failures + 1))
+    fi
+
+    local endpoint_count
+    endpoint_count=$(count_spec_endpoints "$spec_file")
+    local expected_count
+    expected_count=$(json_field "$expected" total_paths)
+
+    # Exact-count: any path beyond the two concat endpoints means a receiver
+    # literal or the control leaked through the 404 filter.
+    if [ "$endpoint_count" != "$expected_count" ]; then
+        log_fail "concat-spa: spec has ${endpoint_count} path(s), expected exactly ${expected_count}"
+        failures=$((failures + 1))
+    fi
+
+    local duration=$((SECONDS - start))
+    if [ $failures -eq 0 ]; then
+        set_test_result "concat-spa" "PASS" "$endpoint_count" "$expected_count" "$duration"
+        log_ok "concat-spa: ALL CHECKS PASSED (${duration}s)"
+    else
+        set_test_result "concat-spa" "FAIL" "$endpoint_count" "$expected_count" "$duration"
+        log_fail "concat-spa: ${failures} check(s) failed (${duration}s)"
     fi
 }
 
@@ -281,16 +422,31 @@ test_soap_service() {
             -o /dev/null 2>/dev/null || true
     done
 
-    # Crawl the service (will capture the WSDL page and index)
-    log_info "Crawling ${base_url}..."
-    if ! "$VESPASIAN" crawl "$base_url" \
-        -o "$capture_file" \
-        --depth 2 \
-        --max-pages 20 \
-        --timeout 1m \
-        --dangerous-allow-private \
-        $verbose_flag 2>&1; then
-        log_warn "Crawl returned non-zero (may still have partial results)"
+    # Crawl the service — both backends for parity.
+    for hl in false true; do
+        local cap="${target_dir}/capture-${hl}.json"
+        if [ "$hl" = "true" ]; then
+            if ! chrome_available; then
+                log_warn "soap-service[headless=true]: Chrome unavailable, skipping rod backend"
+                continue
+            fi
+        fi
+        log_info "Crawling ${base_url} (headless=${hl})..."
+        if ! crawl_backend "$base_url" "$cap" "$hl" --depth 2 --max-pages 20 --timeout 1m $verbose_flag; then
+            if [ "$hl" = "true" ]; then
+                log_warn "soap-service[headless=true]: crawl failed (Chrome may be unlaunchable), skipping rod backend"
+                continue
+            fi
+            log_warn "Crawl returned non-zero (may still have partial results)"
+        fi
+        local n; n=$(json_len "$cap")
+        log_info "soap-service[headless=${hl}]: ${n} requests captured"
+    done
+    # Retain the http capture as this target's crawl artifact (parity with the
+    # other targets / manual inspection). WSDL generation below does NOT use it —
+    # it uses the synthetic $soap_capture built next.
+    if [ -f "${target_dir}/capture-false.json" ]; then
+        cp "${target_dir}/capture-false.json" "$capture_file"
     fi
 
     # Also import the SOAP traffic directly if crawl didn't capture it.
@@ -782,6 +938,56 @@ PYEOF
         # Not a hard failure — inference fallback is valid behavior
     else
         log_ok "Introspection check: $introspection_check"
+    fi
+
+    # Step 7: Rod crawl of / — assert SPA /graphql POST is captured (LAB-1535).
+    # The http backend is expected to miss runtime fetch() calls; rod captures them.
+    log_info "Rod crawl of ${base_url}/ (SPA fetch capture — LAB-1535)..."
+    if ! chrome_available; then
+        log_warn "graphql-server[rod-spa]: Chrome unavailable, skipping SPA fetch assertion"
+    else
+        local rod_capture="${target_dir}/capture-rod.json"
+        local rod_ok=true
+        if ! crawl_backend "$base_url" "$rod_capture" true --depth 2 --max-pages 20 --timeout 1m $verbose_flag; then
+            log_warn "graphql-server[rod-spa]: crawl failed (Chrome may be unlaunchable), skipping SPA assertion"
+            rod_ok=false
+        fi
+        if [ "$rod_ok" = true ]; then
+            if [ ! -f "$rod_capture" ]; then
+                # Crawl reported success but wrote no capture file — count as failure
+                # so the missing assertion is not silently skipped.
+                log_fail "graphql-server[rod-spa]: rod crawl succeeded but capture file absent: ${rod_capture}"
+                failures=$((failures + 1))
+            else
+                local rod_n; rod_n=$(json_len "$rod_capture")
+                log_info "graphql-server[headless=true]: ${rod_n} requests captured"
+                # Assert /graphql POST is present (SPA fetch captured by rod).
+                # `|| echo "error"` keeps this on the file's defensive convention
+                # (cf. json_field/json_len): without it, a python failure (e.g. an
+                # empty capture serialized as JSON `null`, which is not iterable)
+                # would abort the whole suite under `set -e` instead of failing the
+                # assertion.
+                local found_graphql; found_graphql=$(python3 - "$rod_capture" << 'PYEOF' || echo "error"
+import json, sys
+from urllib.parse import urlparse
+with open(sys.argv[1]) as f:
+    reqs = json.load(f)
+# Exact path match (parity with Go hasGraphQLPost) — avoids /api/graphql or query-string variants.
+found = any(r.get("method","").upper()=="POST" and urlparse(r.get("url","")).path=="/graphql" for r in reqs)
+print("yes" if found else "no")
+PYEOF
+                )
+                if [ "$found_graphql" = "yes" ]; then
+                    log_ok "graphql-server[rod-spa]: /graphql POST captured (LAB-1535 confirmed)"
+                elif [ "$found_graphql" = "error" ]; then
+                    log_fail "graphql-server[rod-spa]: could not parse rod capture for /graphql POST assertion"
+                    failures=$((failures + 1))
+                else
+                    log_warn "graphql-server[rod-spa]: /graphql POST NOT captured in rod crawl (SPA fetch missed)"
+                    failures=$((failures + 1))
+                fi
+            fi
+        fi
     fi
 
     local expected_count
@@ -2316,7 +2522,7 @@ main() {
 
     # Default targets from config
     if [ -z "$targets" ]; then
-        targets="${TARGETS_SETUP:-rest-api,soap-service,graphql-server}"
+        targets="${TARGETS_SETUP:-rest-api,soap-service,graphql-server,concat-spa}"
         # Always include importer tests
         targets="${targets},import-burp,import-har,import-base64,import-mitmproxy,import-mitmproxy-native,import-unicode,import-duplicates,import-malformed,import-empty"
         targets="${targets},generate-rest,generate-wsdl,generate-wsdl-matrix,generate-graphql,generate-graphql-imports,generate-js-static"
@@ -2352,6 +2558,7 @@ main() {
             rest-api)      test_rest_api ;;
             soap-service)    test_soap_service ;;
             graphql-server)  test_graphql_server ;;
+            concat-spa)      test_concat_spa ;;
             import-burp)        test_import_burp ;;
             import-har)         test_import_har ;;
             import-base64)      test_import_base64 ;;
