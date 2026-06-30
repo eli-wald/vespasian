@@ -16,7 +16,14 @@ package probe
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -25,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	grpccodes "google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
@@ -66,6 +74,57 @@ func startTestGRPCServerNoReflection(t *testing.T) (string, func()) {
 	s := grpc.NewServer()
 	healthpb.RegisterHealthServer(s, health.NewServer())
 	// reflection.Register(s) intentionally omitted
+
+	go func() {
+		_ = s.Serve(lis)
+	}()
+
+	cleanup := func() {
+		s.GracefulStop()
+	}
+	return lis.Addr().String(), cleanup
+}
+
+// selfSignedTLSConfig builds a *tls.Config carrying a freshly generated,
+// in-memory self-signed certificate valid for 127.0.0.1. It mirrors the kind
+// of certificate an internal/self-hosted gRPC service typically presents.
+func selfSignedTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	cert := tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  key,
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}} //nolint:gosec // test server cert
+}
+
+// startTestGRPCServerTLS brings up an in-process gRPC server on 127.0.0.1:0
+// served over TLS with a self-signed certificate, with the health service and
+// reflection registered. Returns the address and a cleanup function.
+func startTestGRPCServerTLS(t *testing.T) (string, func()) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	s := grpc.NewServer(grpc.Creds(credentials.NewTLS(selfSignedTLSConfig(t))))
+	healthpb.RegisterHealthServer(s, health.NewServer())
+	reflection.Register(s)
 
 	go func() {
 		_ = s.Serve(lis)
@@ -133,6 +192,38 @@ func TestGRPCProbe_Probe_DiscoversHealthService(t *testing.T) {
 
 	// FileDescriptors should be populated with at least the health proto.
 	assert.NotEmpty(t, schema.FileDescriptors, "expected FileDescriptors to be populated")
+}
+
+// TestGRPCProbe_Probe_SelfSignedTLS proves that a gRPC server presenting a
+// self-signed certificate is still enumerated: the probe disables trust-chain
+// verification (SSRF is handled separately by the Dialer), so the self-signed
+// cert must NOT block reflection.
+func TestGRPCProbe_Probe_SelfSignedTLS(t *testing.T) {
+	addr, stop := startTestGRPCServerTLS(t)
+	defer stop()
+
+	cfg := Config{
+		Timeout:      5 * time.Second,
+		URLValidator: func(string) error { return nil },
+		Dialer:       loopbackDialer,
+	}
+	probe := NewGRPCProbe(cfg)
+
+	endpoints := []classify.ClassifiedRequest{
+		{APIType: "grpc"},
+	}
+	endpoints[0].URL = "https://" + addr + "/grpc.health.v1.Health/Check"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := probe.Probe(ctx, endpoints)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+
+	schema := result[0].GRPCSchema
+	require.NotNil(t, schema, "GRPCSchema should be populated despite the self-signed certificate")
+	assert.True(t, schema.ReflectionEnabled, "self-signed cert must not block enumeration")
 }
 
 func TestGRPCProbe_Probe_FiltersReflectionServiceItself(t *testing.T) {

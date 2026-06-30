@@ -263,7 +263,9 @@ The probe enumerates a target's services, methods, and message types via the [gR
 - **Reflection disabled**: when a server is reachable but reflection is off or gated, Vespasian reports a structured reason — `Unimplemented` (not registered), or `Unauthenticated`/`PermissionDenied` (auth-gated) — instead of failing silently.
 - **Auth-gated reflection**: the probe does not yet send call credentials/metadata, so servers requiring auth for reflection are *detected and reported* as `Unauthenticated`/`PermissionDenied`, not bypassed.
 - **Generator requirement**: `.proto` generation requires reflection descriptors; traffic-only inference is not yet supported, so a reflection-disabled target yields no spec.
+- **Partial descriptors**: if the reflection result is missing a transitive import (e.g. a very large import graph truncated at the fetch cap), the generator emits every `.proto` it can still link and lists the omitted files in a `// WARNING:` header, rather than failing the whole generation.
 - **SSRF protection**: the dial target is validated before connecting and re-checked at connect time (closing the DNS-rebinding TOCTOU window), the same as the HTTP probe path.
+- **TLS targets**: certificates are **not** verified during enumeration — internal gRPC services commonly present self-signed or internal-CA certs, and certificate trust is not the relevant control here (SSRF is enforced by the dialer). Self-signed `grpcs`/`https` targets are enumerated rather than silently dropped.
 
 ## CLI Reference
 

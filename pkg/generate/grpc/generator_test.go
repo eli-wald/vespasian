@@ -202,3 +202,82 @@ func TestGenerator_Generate_SkipsWellKnownImports(t *testing.T) {
 	assert.NotContains(t, output, "message Timestamp")
 	assert.Contains(t, output, "service UserService")
 }
+
+// danglingImportFileBytes builds a FileDescriptorProto that depends on a file
+// ("missing.proto") which is NOT present in the descriptor set, so its import
+// cannot be resolved. Used to exercise the partial-resolution path.
+func danglingImportFileBytes(t *testing.T) []byte {
+	t.Helper()
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name:       proto.String("broken.proto"),
+		Package:    proto.String("broken.v1"),
+		Syntax:     proto.String("proto3"),
+		Dependency: []string{"missing.proto"},
+		MessageType: []*descriptorpb.DescriptorProto{
+			{
+				Name: proto.String("BrokenMessage"),
+				Field: []*descriptorpb.FieldDescriptorProto{
+					{
+						Name:     proto.String("value"),
+						Number:   proto.Int32(1),
+						Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+						Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+						JsonName: proto.String("value"),
+					},
+				},
+			},
+		},
+	}
+	raw, err := proto.Marshal(fdp)
+	require.NoError(t, err)
+	return raw
+}
+
+func TestGenerator_Generate_PartialResolutionSkipsBrokenFile(t *testing.T) {
+	g := &Generator{}
+
+	endpoints := []classify.ClassifiedRequest{
+		{
+			APIType: "grpc",
+			GRPCSchema: &classify.GRPCReflectionResult{
+				ReflectionEnabled: true,
+				FileDescriptors: map[string][]byte{
+					"users.proto":  fileDescriptorBytes(t),
+					"broken.proto": danglingImportFileBytes(t),
+				},
+			},
+		},
+	}
+
+	out, err := g.Generate(endpoints)
+	require.NoError(t, err)
+	output := string(out)
+
+	// users.proto survived and was emitted.
+	assert.Contains(t, output, "service UserService")
+	assert.Contains(t, output, "message GetUserRequest")
+
+	// broken.proto was skipped and reported.
+	assert.Contains(t, output, "WARNING")
+	assert.Contains(t, output, "broken.proto")
+}
+
+func TestGenerator_Generate_AllUnresolvableErrors(t *testing.T) {
+	g := &Generator{}
+
+	endpoints := []classify.ClassifiedRequest{
+		{
+			APIType: "grpc",
+			GRPCSchema: &classify.GRPCReflectionResult{
+				ReflectionEnabled: true,
+				FileDescriptors: map[string][]byte{
+					"broken.proto": danglingImportFileBytes(t),
+				},
+			},
+		},
+	}
+
+	_, err := g.Generate(endpoints)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "build descriptor graph")
+}

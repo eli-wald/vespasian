@@ -94,9 +94,9 @@ func renderProto(fileDescriptors map[string][]byte) ([]byte, error) {
 		fdProtos = append(fdProtos, &fdp)
 	}
 
-	fds, err := desc.CreateFileDescriptorsFromSet(&descriptorpb.FileDescriptorSet{File: fdProtos})
+	fds, skipped, err := buildDescriptorGraph(fdProtos)
 	if err != nil {
-		return nil, fmt.Errorf("build descriptor graph: %w", err)
+		return nil, err
 	}
 
 	names := make([]string, 0, len(fds))
@@ -114,8 +114,15 @@ func renderProto(fileDescriptors map[string][]byte) ([]byte, error) {
 
 	printer := &protoprint.Printer{SortElements: true}
 	var buf bytes.Buffer
-	for _, name := range names {
-		if buf.Len() > 0 {
+	if len(skipped) > 0 {
+		fmt.Fprintf(&buf, "// WARNING: %d .proto file(s) omitted due to unresolved imports or link errors:\n", len(skipped))
+		for _, s := range skipped {
+			fmt.Fprintf(&buf, "//   - %s\n", s)
+		}
+		buf.WriteString("\n")
+	}
+	for i, name := range names {
+		if i > 0 {
 			buf.WriteString("\n// ---\n\n")
 		}
 		if err := printer.PrintProtoFile(fds[name], &buf); err != nil {
@@ -123,4 +130,70 @@ func renderProto(fileDescriptors map[string][]byte) ([]byte, error) {
 		}
 	}
 	return buf.Bytes(), nil
+}
+
+// buildDescriptorGraph resolves fdProtos into linked descriptors. It first
+// tries the strict all-or-nothing path (the common case, where reflection
+// returned a complete import closure). If that fails — e.g. the probe
+// truncated a large import graph at maxGRPCFileDescriptors and left a
+// dangling import — it degrades to resolving each file independently,
+// returning every file it can link plus the sorted names of those it had
+// to skip, rather than discarding the entire result. Only when nothing
+// links does it surface the original strict error.
+func buildDescriptorGraph(fdProtos []*descriptorpb.FileDescriptorProto) (map[string]*desc.FileDescriptor, []string, error) {
+	if fds, err := desc.CreateFileDescriptorsFromSet(&descriptorpb.FileDescriptorSet{File: fdProtos}); err == nil {
+		return fds, nil, nil
+	} else {
+		strictErr := err
+
+		files := make(map[string]*descriptorpb.FileDescriptorProto, len(fdProtos))
+		for _, fdp := range fdProtos {
+			files[fdp.GetName()] = fdp
+		}
+
+		resolved := map[string]*desc.FileDescriptor{}
+		var resolve func(name string, stack map[string]bool) (*desc.FileDescriptor, error)
+		resolve = func(name string, stack map[string]bool) (*desc.FileDescriptor, error) {
+			if fd, ok := resolved[name]; ok {
+				return fd, nil
+			}
+			if stack[name] {
+				return nil, fmt.Errorf("cyclic import involving %q", name)
+			}
+			fdp, ok := files[name]
+			if !ok {
+				return nil, fmt.Errorf("missing dependency %q", name)
+			}
+			stack[name] = true
+			deps := make([]*desc.FileDescriptor, 0, len(fdp.GetDependency()))
+			for _, dep := range fdp.GetDependency() {
+				d, err := resolve(dep, stack)
+				if err != nil {
+					delete(stack, name)
+					return nil, err
+				}
+				deps = append(deps, d)
+			}
+			delete(stack, name)
+			fd, err := desc.CreateFileDescriptor(fdp, deps...)
+			if err != nil {
+				return nil, err
+			}
+			resolved[name] = fd
+			return fd, nil
+		}
+
+		var skipped []string
+		for name := range files {
+			if _, err := resolve(name, map[string]bool{}); err != nil {
+				skipped = append(skipped, name)
+			}
+		}
+		sort.Strings(skipped)
+
+		if len(resolved) == 0 {
+			return nil, nil, fmt.Errorf("build descriptor graph: %w", strictErr)
+		}
+		return resolved, skipped, nil
+	}
 }

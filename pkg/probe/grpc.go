@@ -189,7 +189,16 @@ func (p *GRPCProbe) probeTarget(ctx context.Context, t grpcTargetInfo) *classify
 
 	var creds credentials.TransportCredentials
 	if t.useTLS {
-		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
+		// Enumeration probe: internal/self-hosted gRPC services routinely
+		// present self-signed or internal-CA certificates. Verifying the
+		// trust chain adds no enumeration value and would silently drop those
+		// targets. SSRF protection is enforced separately by the configured
+		// Dialer (re-resolves and re-checks the IP at connect time), not by
+		// the TLS trust chain.
+		creds = credentials.NewTLS(&tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true, //nolint:gosec // G402: enumeration probe; trust chain is not the control, SSRF is handled by the Dialer
+		})
 	} else {
 		creds = insecure.NewCredentials()
 	}
