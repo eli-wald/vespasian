@@ -841,7 +841,7 @@ func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts ge
 		classified = enriched
 	}
 
-	gen, err := generate.Get(opts.APIType, generate.Options{MergeSlugs: opts.MergeSlugs, SlugThreshold: opts.SlugThreshold})
+	gen, err := generate.GetWithOptions(opts.APIType, generate.Options{MergeSlugs: opts.MergeSlugs, SlugThreshold: opts.SlugThreshold})
 	if err != nil {
 		return nil, err
 	}

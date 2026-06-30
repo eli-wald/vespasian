@@ -32,8 +32,14 @@ type Options struct {
 	SlugThreshold int
 }
 
-// Get returns a SpecGenerator for the given API type.
-func Get(apiType string, opts Options) (SpecGenerator, error) {
+// Get returns a SpecGenerator for the given API type using default options.
+func Get(apiType string) (SpecGenerator, error) {
+	return GetWithOptions(apiType, Options{})
+}
+
+// GetWithOptions returns a SpecGenerator for the given API type configured
+// with the supplied options.
+func GetWithOptions(apiType string, opts Options) (SpecGenerator, error) {
 	switch apiType {
 	case "rest":
 		return &rest.OpenAPIGenerator{MergeSlugs: opts.MergeSlugs, SlugThreshold: opts.SlugThreshold}, nil

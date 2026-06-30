@@ -93,7 +93,7 @@ type OpenAPIGenerator struct {
 	// Format specifies the output format: "json" or "yaml" (default: "yaml")
 	Format string
 	// MergeSlugs enables observation-based slug promotion during path
-	// normalization (see normalizeOptions). Off by default.
+	// normalization (see NormalizeOptions). Off by default.
 	MergeSlugs bool
 	// SlugThreshold is the minimum distinct values at a path position before
 	// promotion; clamped to >=2 downstream. Ignored unless MergeSlugs is set.
@@ -151,7 +151,7 @@ func extractServers(endpoints []classify.ClassifiedRequest) (openapi3.Servers, s
 // detected from the population of observed paths. The first pass parses URLs
 // and collects their paths; the second pass calls NormalizePathsWithNames
 // once, which performs both regex-based and observation-based detection.
-func groupEndpoints(endpoints []classify.ClassifiedRequest, opts normalizeOptions) map[endpointKey][]classify.ClassifiedRequest {
+func groupEndpoints(endpoints []classify.ClassifiedRequest, opts NormalizeOptions) map[endpointKey][]classify.ClassifiedRequest {
 	type parsedEndpoint struct {
 		path     string
 		endpoint classify.ClassifiedRequest
@@ -555,7 +555,7 @@ func (g *OpenAPIGenerator) Generate(endpoints []classify.ClassifiedRequest) ([]b
 	}
 
 	// Group and sort endpoints
-	endpointGroups := groupEndpoints(endpoints, normalizeOptions{mergeSlugs: g.MergeSlugs, slugThreshold: g.SlugThreshold})
+	endpointGroups := groupEndpoints(endpoints, NormalizeOptions{MergeSlugs: g.MergeSlugs, SlugThreshold: g.SlugThreshold})
 
 	// Determine whether to emit x-vespasian-source extensions.
 	// Only emitted when at least one input request has a "static:" Source so that

@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func mergeOpts() normalizeOptions { return normalizeOptions{mergeSlugs: true} }
+func mergeOpts() NormalizeOptions { return NormalizeOptions{MergeSlugs: true} }
 
 func TestNormalizePath_UUID(t *testing.T) {
 	tests := []struct {
@@ -1215,12 +1215,12 @@ func TestNormalizePathsWithNames_MergeDisabledByDefault(t *testing.T) {
 		"/navigation/source/info.php",
 		"/navigation/source/low.php",
 	}
-	got := NormalizePathsWithNames(paths, normalizeOptions{})
+	got := NormalizePathsWithNames(paths, NormalizeOptions{})
 	require.Equal(t, "/navigation/source/info.php", got["/navigation/source/info.php"])
 	require.Equal(t, "/navigation/source/low.php", got["/navigation/source/low.php"])
 
 	// Regex ID detection is unaffected by mergeSlugs.
-	ids := NormalizePathsWithNames([]string{"/users/42", "/users/99"}, normalizeOptions{})
+	ids := NormalizePathsWithNames([]string{"/users/42", "/users/99"}, NormalizeOptions{})
 	require.Equal(t, "/users/{userId}", ids["/users/42"])
 	require.Equal(t, "/users/{userId}", ids["/users/99"])
 }
@@ -1229,11 +1229,11 @@ func TestNormalizePathsWithNames_MergeDisabledByDefault(t *testing.T) {
 // many distinct values are needed before a position is promoted to a slug.
 func TestNormalizePathsWithNames_SlugThreshold(t *testing.T) {
 	twoVals := []string{"/posts/a", "/posts/b"}
-	got := NormalizePathsWithNames(twoVals, normalizeOptions{mergeSlugs: true, slugThreshold: 3})
+	got := NormalizePathsWithNames(twoVals, NormalizeOptions{MergeSlugs: true, SlugThreshold: 3})
 	require.Equal(t, "/posts/a", got["/posts/a"], "2 values must not merge at threshold 3")
 	require.Equal(t, "/posts/b", got["/posts/b"])
 
 	threeVals := []string{"/posts/a", "/posts/b", "/posts/c"}
-	got = NormalizePathsWithNames(threeVals, normalizeOptions{mergeSlugs: true, slugThreshold: 3})
+	got = NormalizePathsWithNames(threeVals, NormalizeOptions{MergeSlugs: true, SlugThreshold: 3})
 	require.Equal(t, "/posts/{postSlug}", got["/posts/a"], "3 values must merge at threshold 3")
 }

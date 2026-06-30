@@ -267,25 +267,25 @@ type segLoc struct {
 	pathIdx, segIdx int
 }
 
-// normalizeOptions controls observation-based slug promotion in
+// NormalizeOptions controls observation-based slug promotion in
 // NormalizePathsWithNames. Regex-based ID detection (UUID, numeric, ObjectID,
 // short hex, base64) always runs and is NOT affected by these options.
-type normalizeOptions struct {
-	// mergeSlugs enables observation-based promotion of varying literal
+type NormalizeOptions struct {
+	// MergeSlugs enables observation-based promotion of varying literal
 	// segments to {slug} parameters. Off by default so distinct endpoints
 	// that merely share a path prefix are not collapsed.
-	mergeSlugs bool
-	// slugThreshold is the minimum number of distinct values that must be
+	MergeSlugs bool
+	// SlugThreshold is the minimum number of distinct values that must be
 	// observed at a position before it is promoted to a slug. Values < 2 are
 	// clamped to 2 — a threshold of 1 would merge every sibling segment.
-	slugThreshold int
+	SlugThreshold int
 }
 
 // NormalizePathsWithNames classifies each input path's segments by regex /
-// literal kind, then — when opts.mergeSlugs is set — performs
+// literal kind, then — when opts.MergeSlugs is set — performs
 // observation-based detection: a position whose literal segment value varies
 // across paths sharing the same prefix and suffix shape (and same path
-// length), across at least opts.slugThreshold distinct values, is promoted to
+// length), across at least opts.SlugThreshold distinct values, is promoted to
 // a slug-style parameter. Promotion runs to a fixed point — promoting one position can
 // change the shape of a sibling position, exposing additional varying
 // buckets — so the function iterates until no further promotions occur.
@@ -309,18 +309,18 @@ type normalizeOptions struct {
 // today; downstream consumers receive a partially-normalized result. A
 // debug logging hook for cap-saturation events is a reasonable future
 // addition but is not in scope for LAB-2107.
-func NormalizePathsWithNames(paths []string, opts normalizeOptions) map[string]string {
+func NormalizePathsWithNames(paths []string, opts NormalizeOptions) map[string]string {
 	if len(paths) == 0 {
 		return map[string]string{}
 	}
-	if opts.slugThreshold < 2 {
-		opts.slugThreshold = 2
+	if opts.SlugThreshold < 2 {
+		opts.SlugThreshold = 2
 	}
 
 	infos := classifyPaths(paths)
-	if opts.mergeSlugs {
+	if opts.MergeSlugs {
 		for i := 0; i < maxPromotionRounds; i++ {
-			varying := findVaryingPositions(infos, opts.slugThreshold)
+			varying := findVaryingPositions(infos, opts.SlugThreshold)
 			if len(varying) == 0 {
 				break
 			}
