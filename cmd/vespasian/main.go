@@ -285,6 +285,12 @@ type CrawlOptions struct {
 	FetchSourcemaps bool          `name:"fetch-sourcemaps" default:"true"  help:"When --analyze-js is set, fetch .js.map sourcemaps referenced via //# sourceMappingURL= comments to recover original sources."`
 }
 
+// SlugOptions holds the path-normalization flags shared by GenerateCmd and ScanCmd.
+type SlugOptions struct {
+	MergeSlugs    bool `name:"merge-slugs" help:"Enable slug-based path merging (off by default). See README for when to use this vs. distinct endpoint preservation."`
+	SlugThreshold int  `name:"slug-threshold" default:"2" help:"Distinct values required at a path position before --merge-slugs collapses it; higher is more conservative (minimum 2). See README."`
+}
+
 // setupForceExitHandler spawns a goroutine that waits for the first signal
 // to be handled (ctx.Done), then registers for a second SIGINT/SIGTERM and
 // force-exits the process. This avoids a race where both the graceful handler
@@ -505,6 +511,8 @@ type GenerateCmd struct {
 	Verbose                bool    `short:"v" help:"Enable verbose logging"`
 	AnalyzeJS              bool    `name:"analyze-js"       default:"true"  help:"Statically analyze JS bundles in the imported capture (when present)."`
 	FetchSourcemaps        bool    `name:"fetch-sourcemaps" default:"false" help:"When --analyze-js is set, fetch .js.map sourcemaps referenced via //# sourceMappingURL= comments. Default false on generate (offline-friendly)."`
+
+	SlugOptions
 }
 
 // API type constants used for classification routing and generation.
@@ -521,6 +529,10 @@ const maxCaptureSize = 100 * 1024 * 1024
 
 // Run executes the generate command.
 func (c *GenerateCmd) Run() (err error) {
+	if err := validateSlugThreshold(c.APIType, c.MergeSlugs, c.SlugThreshold); err != nil {
+		return err
+	}
+
 	f, err := os.Open(c.Capture)
 	if err != nil {
 		return fmt.Errorf("open capture file: %w", err)
@@ -571,6 +583,8 @@ func (c *GenerateCmd) Run() (err error) {
 		AllowPrivate:           c.DangerousAllowPrivate,
 		GRPCInsecureSkipVerify: c.GRPCInsecureSkipVerify,
 		Verbose:                c.Verbose,
+		MergeSlugs:             c.MergeSlugs,
+		SlugThreshold:          c.SlugThreshold,
 	})
 	if err != nil {
 		return err
@@ -593,11 +607,16 @@ type ScanCmd struct {
 	GRPCInsecureSkipVerify bool    `help:"Skip TLS certificate verification when probing gRPC server reflection over TLS (for self-signed/internal-CA targets). Default: verify." name:"grpc-insecure-skip-verify"`
 
 	CrawlOptions
+	SlugOptions
 }
 
 // Run executes the scan command (crawl + generate pipeline).
 func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	if err := validateURL(c.URL); err != nil {
+		return err
+	}
+
+	if err := validateSlugThreshold(c.APIType, c.MergeSlugs, c.SlugThreshold); err != nil {
 		return err
 	}
 
@@ -709,6 +728,8 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 		AllowPrivate:           c.DangerousAllowPrivate,
 		GRPCInsecureSkipVerify: c.GRPCInsecureSkipVerify,
 		Verbose:                c.Verbose,
+		MergeSlugs:             c.MergeSlugs,
+		SlugThreshold:          c.SlugThreshold,
 	})
 	if err != nil {
 		return err
@@ -769,6 +790,8 @@ type generateSpecOptions struct {
 	AllowPrivate           bool
 	GRPCInsecureSkipVerify bool
 	Verbose                bool
+	MergeSlugs             bool
+	SlugThreshold          int
 }
 
 // augmentWithStaticForms appends synthetic ObservedRequests parsed from HTML
@@ -807,15 +830,35 @@ func augmentAll(ctx context.Context, requests []crawl.ObservedRequest, js jsAnal
 	return requests
 }
 
+// validateSlugThreshold rejects --slug-threshold < 2 when --merge-slugs is on.
+// wsdl/graphql ignore slug options, so they are exempt to avoid a misleading
+// error. Called early in GenerateCmd.Run and ScanCmd.Run so the crawl/file I/O
+// never starts on an invalid flag combination, and again inside generateSpec to
+// cover direct callers.
+func validateSlugThreshold(apiType string, mergeSlugs bool, slugThreshold int) error {
+	if apiType == apiTypeWSDL || apiType == apiTypeGraphQL {
+		return nil
+	}
+	if mergeSlugs && slugThreshold < 2 {
+		return fmt.Errorf("--slug-threshold must be >= 2")
+	}
+	return nil
+}
+
 // generateSpec runs the classify → probe → generate pipeline. It trusts its
 // caller to have already augmented requests with static-HTML form
 // observations AND JS-bundle static analysis — both ScanCmd and GenerateCmd
 // call augmentAll (which performs both stages in order) before invoking this
 // function.
-func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts generateSpecOptions) ([]byte, error) {
+func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts generateSpecOptions) ([]byte, error) { //nolint:gocyclo // classify → probe → generate orchestration
 	classifiers := classifiersForType(opts.APIType)
 	if classifiers == nil {
 		return nil, fmt.Errorf("unsupported API type: %q", opts.APIType)
+	}
+	// REST-scoped: wsdl/graphql ignore slug options (see validateSlugThreshold).
+	// The rest package additionally clamps <2 to 2 for non-CLI callers.
+	if err := validateSlugThreshold(opts.APIType, opts.MergeSlugs, opts.SlugThreshold); err != nil {
+		return nil, err
 	}
 	classified := classify.RunClassifiers(classifiers, requests, opts.Confidence)
 	if opts.Deduplicate {
@@ -872,7 +915,7 @@ func generateSpec(ctx context.Context, requests []crawl.ObservedRequest, opts ge
 		classified = enriched
 	}
 
-	gen, err := generate.Get(opts.APIType)
+	gen, err := generate.GetWithOptions(opts.APIType, generate.Options{MergeSlugs: opts.MergeSlugs, SlugThreshold: opts.SlugThreshold})
 	if err != nil {
 		return nil, err
 	}
