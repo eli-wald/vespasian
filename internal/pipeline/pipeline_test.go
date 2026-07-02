@@ -151,3 +151,58 @@ func TestClassifyProbeGenerate_ProbeEnabledEmitsSpec(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, spec, "expected non-empty OpenAPI spec when Probe=true")
 }
+
+// slugRequests returns two REST requests to sibling slug paths under the same
+// collection (/api/posts/a and /api/posts/b), enough distinct values to trip
+// slug merging at threshold 2.
+func slugRequests() []crawl.ObservedRequest {
+	req := func(url string) crawl.ObservedRequest {
+		return crawl.ObservedRequest{
+			Method:  "GET",
+			URL:     url,
+			Headers: map[string]string{"Content-Type": "application/json"},
+			Response: crawl.ObservedResponse{
+				StatusCode:  200,
+				ContentType: "application/json",
+				Headers:     map[string]string{"Content-Type": "application/json"},
+				Body:        []byte(`{"id":1}`),
+			},
+		}
+	}
+	return []crawl.ObservedRequest{
+		req("https://x.com/api/posts/a"),
+		req("https://x.com/api/posts/b"),
+	}
+}
+
+// TestClassifyProbeGenerate_MergeSlugsPassThrough pins that Options.MergeSlugs
+// and Options.SlugThreshold reach generate.GetWithOptions: with MergeSlugs set,
+// two sibling slug paths collapse into one templated path in the emitted spec,
+// whereas leaving MergeSlugs unset keeps them literal. Without this, a regressed
+// pass-through at this layer would go undetected (it is otherwise only exercised
+// via the CLI and pkg/generate).
+func TestClassifyProbeGenerate_MergeSlugsPassThrough(t *testing.T) {
+	merged, err := pipeline.ClassifyProbeGenerate(context.Background(), slugRequests(), pipeline.Options{
+		APIType:       pipeline.APITypeREST,
+		Confidence:    0.5,
+		Probe:         false,
+		Deduplicate:   true,
+		MergeSlugs:    true,
+		SlugThreshold: 2,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(merged), "/api/posts/{postSlug}", "MergeSlugs=true must collapse siblings into a templated path")
+	assert.NotContains(t, string(merged), "/api/posts/a", "merged spec must not retain the literal slug path")
+
+	// Control: without MergeSlugs the same input keeps the literal paths, proving
+	// the collapse above is driven by the flag pass-through, not the fixture.
+	literal, err := pipeline.ClassifyProbeGenerate(context.Background(), slugRequests(), pipeline.Options{
+		APIType:     pipeline.APITypeREST,
+		Confidence:  0.5,
+		Probe:       false,
+		Deduplicate: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(literal), "/api/posts/a", "MergeSlugs unset must keep the literal slug path")
+	assert.NotContains(t, string(literal), "{postSlug}", "MergeSlugs unset must not template the slug position")
+}

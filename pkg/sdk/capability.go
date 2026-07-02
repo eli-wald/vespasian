@@ -163,6 +163,7 @@ func (c *Capability) Invoke(ctx capability.ExecutionContext, input capmodel.WebA
 		"emitted_webpages", emittedPages,
 		"has_spec", hasSpec,
 		"api_type", apiType,
+		"error", scanErr, // nil on success; non-nil distinguishes a failed spec emit
 	)
 	return scanErr
 }

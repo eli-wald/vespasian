@@ -314,3 +314,31 @@ func TestResolveWSDLType_ProbeFailureRetainsInputType(t *testing.T) {
 	assert.Equal(t, pipeline.APITypeREST, resolvedType, "input apiType must be preserved when no WSDL found")
 	assert.Equal(t, initial, got, "original requests slice must be returned unchanged")
 }
+
+// TestResolveWSDLType_SSRFGate_AllowPrivateFalse pins that the SSRF gate is
+// honored end-to-end through ResolveWSDLType — the exact config the SDK uses
+// (probe=true, allowPrivate=false). A private/loopback target must be rejected
+// by probe.ValidateProbeURL before any request is issued, surfacing as a probe
+// miss: found=false, apiType unchanged, requests unchanged. TEST-003 covers this
+// at the ProbeWSDLDocument level; this pins the propagation through
+// ResolveWSDLType.
+func TestResolveWSDLType_SSRFGate_AllowPrivateFalse(t *testing.T) {
+	initial := []crawl.ObservedRequest{
+		{Method: "GET", URL: "http://127.0.0.1:1/svc"},
+	}
+
+	var buf bytes.Buffer
+	got, resolvedType, found := pipeline.ResolveWSDLType(
+		context.Background(),
+		"http://127.0.0.1:1/svc",
+		pipeline.APITypeREST,
+		initial,
+		true,  // probe enabled
+		false, // allowPrivate=false — SSRF protection ON (SDK config)
+		&buf,
+	)
+
+	assert.False(t, found, "SSRF gate must reject a private target as a probe miss")
+	assert.Equal(t, pipeline.APITypeREST, resolvedType, "apiType must be preserved when the SSRF gate blocks the probe")
+	assert.Equal(t, initial, got, "requests slice must be returned unchanged when the probe is blocked")
+}

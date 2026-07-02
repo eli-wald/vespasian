@@ -621,7 +621,9 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	// type" line reflects the traffic-derived type *before* any WSDL promotion,
 	// matching the pre-refactor ordering. The resolved type is then passed
 	// explicitly into ResolveAndGenerate, which skips re-detection for a
-	// non-auto type.
+	// non-auto type. Passing the resolved (non-auto) type is precisely what
+	// prevents a second DetectAPIType pass inside ResolveAndGenerate — the two
+	// detection sites are coupled, so keep them in sync if either changes.
 	apiType := c.APIType
 	if apiType == pipeline.APITypeAuto {
 		apiType = pipeline.DetectAPIType(requests, c.Confidence)
