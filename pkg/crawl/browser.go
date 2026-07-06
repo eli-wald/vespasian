@@ -17,6 +17,7 @@ package crawl
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"sync"
 
 	"github.com/go-rod/rod"
@@ -62,6 +63,9 @@ func NewBrowserManager(opts BrowserOptions) (*BrowserManager, error) {
 		Headless(opts.Headless)
 
 	if opts.NoSandbox {
+		l = l.NoSandbox(true)
+	}
+	if !opts.NoSandbox && os.Getenv("CI") != "" {
 		l = l.NoSandbox(true)
 	}
 	if opts.ChromePath != "" {
