@@ -56,7 +56,7 @@ type CrawlerOptions struct {
 	Scope         string
 	Headless      bool
 	Headers       map[string]string
-	Proxy         string    // optional: proxy address for Chrome (e.g., "http://127.0.0.1:8080")
+	Proxy         string    // optional: proxy address for the crawler backend (e.g., "http://127.0.0.1:8080")
 	ProxyInsecure bool      // net/http backend only: disable TLS verification for an http/https intercepting proxy (Burp/mitmproxy MITM). Off by default; no effect on the headless backend or on socks5.
 	Concurrency   int       // headless tab concurrency; 0 uses DefaultConcurrency (10)
 	AllowPrivate  bool      // disable SSRF protection, allowing private/internal targets
