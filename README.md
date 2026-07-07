@@ -273,10 +273,11 @@ vespasian scan <url> [flags]
   --headless         Headless Chrome mode (default: true); --headless=false uses the stdlib net/http engine
   --proxy            Proxy URL for the crawl stage (e.g., http://127.0.0.1:8080); http/https/socks5.
                      Routes crawl traffic on both backends; probe and JS-replay traffic is not proxied.
-                     On the net/http backend, TLS verification is disabled for http/https intercepting
-                     proxies (Burp/mitmproxy) so their MITM cert is accepted; socks5 keeps normal
-                     verification. Private targets still require --dangerous-allow-private (proxy relaxes
-                     only the dial-time SSRF pin, not URL scope).
+                     TLS verification stays on by default. Private targets still require
+                     --dangerous-allow-private (proxy relaxes only the dial-time SSRF pin, not URL scope).
+  --proxy-insecure   Disable TLS certificate verification for an http/https intercepting proxy
+                     (Burp/mitmproxy MITM) on the net/http backend (--headless=false). Off by default;
+                     no effect on socks5 or the headless backend (trust the proxy CA via the OS store).
   --confidence       Min classification confidence (default: 0.5)
   --probe            Enable active probing (default: true)
   --deduplicate      Deduplicate endpoints before probing (default: true)
@@ -305,10 +306,11 @@ vespasian crawl <url> [flags]
   --headless         Headless Chrome mode (default: true); --headless=false uses the stdlib net/http engine
   --proxy            Proxy URL for the crawl stage (e.g., http://127.0.0.1:8080); http/https/socks5.
                      Routes crawl traffic on both backends; probe and JS-replay traffic is not proxied.
-                     On the net/http backend, TLS verification is disabled for http/https intercepting
-                     proxies (Burp/mitmproxy) so their MITM cert is accepted; socks5 keeps normal
-                     verification. Private targets still require --dangerous-allow-private (proxy relaxes
-                     only the dial-time SSRF pin, not URL scope).
+                     TLS verification stays on by default. Private targets still require
+                     --dangerous-allow-private (proxy relaxes only the dial-time SSRF pin, not URL scope).
+  --proxy-insecure   Disable TLS certificate verification for an http/https intercepting proxy
+                     (Burp/mitmproxy MITM) on the net/http backend (--headless=false). Off by default;
+                     no effect on socks5 or the headless backend (trust the proxy CA via the OS store).
   --dangerous-allow-private  Disable SSRF protection for crawling, allowing
                      private/localhost targets (localhost, 127.0.0.1, RFC1918,
                      link-local). Required when the seed URL is a private

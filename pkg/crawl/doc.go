@@ -37,13 +37,15 @@
 // (http/https/socks5), validated by [ValidateProxyAddr]. On the HTTP path the
 // proxy is wired into the transport via http.ProxyURL. Two consequences follow
 // from routing through an intercepting proxy (Burp, mitmproxy):
-//   - For http/https intercepting proxies, TLS certificate verification is
-//     disabled (InsecureSkipVerify) so the proxy's own MITM certificate is
-//     accepted. Unlike Chrome on the headless path (which validates against
-//     the OS trust store and therefore requires the operator to trust the
-//     proxy CA out-of-band), the Go client has no trust store to fall back on.
-//     For socks5 proxies the Go client does TLS directly with the target
-//     through the tunnel, so normal verification is kept.
+//   - TLS certificate verification stays ON by default. For an http/https
+//     intercepting proxy it can be disabled (InsecureSkipVerify) only by the
+//     explicit opt-in [CrawlerOptions.ProxyInsecure] (--proxy-insecure), so the
+//     proxy's own MITM certificate is accepted. This opt-in applies to the HTTP
+//     backend only; on the headless path Chrome validates against the OS trust
+//     store, so the operator must trust the proxy CA out-of-band and
+//     --proxy-insecure has no effect there. For socks5 proxies the Go client
+//     does TLS directly with the target through the tunnel, so verification is
+//     always kept regardless of ProxyInsecure.
 //   - The dial-time SSRF pin (ssrfSafeDialContext) is NOT installed for proxy
 //     connections: the client dials the proxy (commonly loopback), not the
 //     target, so pinning the dialed IP would block the proxy and gives no

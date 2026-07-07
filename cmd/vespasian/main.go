@@ -237,7 +237,8 @@ type CrawlOptions struct {
 	Timeout         time.Duration `default:"10m" help:"Maximum duration for the entire crawl"`
 	Scope           string        `default:"same-origin" enum:"same-origin,same-domain" help:"Crawl scope"`
 	Headless        bool          `default:"true" help:"Use headless browser"`
-	Proxy           string        `help:"Proxy address for the crawl stage (e.g., http://127.0.0.1:8080); http/https/socks5. Routes crawl traffic through the proxy on both crawler backends: Chrome (headless) or the net/http transport (--headless=false). Probe and JS-replay traffic is not proxied. On the net/http backend, TLS verification is disabled for http/https intercepting proxies (Burp/mitmproxy) so their MITM certificate is accepted; socks5 tunnels keep normal verification. With --proxy the dial-time SSRF IP pin is skipped for the proxy connection; URL scope is still enforced, so private targets still require --dangerous-allow-private."`
+	Proxy           string        `help:"Proxy address for the crawl stage (e.g., http://127.0.0.1:8080); http/https/socks5. Routes crawl traffic through the proxy on both crawler backends: Chrome (headless) or the net/http transport (--headless=false). Probe and JS-replay traffic is not proxied. TLS verification stays on by default; use --proxy-insecure to accept an intercepting proxy's MITM certificate on the net/http backend. With --proxy the dial-time SSRF IP pin is skipped for the proxy connection; URL scope is still enforced, so private targets still require --dangerous-allow-private."`
+	ProxyInsecure   bool          `name:"proxy-insecure" help:"Disable TLS certificate verification for an http/https intercepting proxy (Burp/mitmproxy MITM) on the net/http backend (--headless=false). Off by default; no effect on socks5 or the headless backend (there, trust the proxy CA via the OS trust store instead)."`
 	Concurrency     int           `default:"10" help:"Number of concurrent browser tabs for headless crawling"`
 	NoRequestID     bool          `name:"no-request-id" help:"Disable automatic X-Vespasian-Request-Id header"`
 	Verbose         bool          `short:"v" help:"Enable verbose logging"`
@@ -368,14 +369,15 @@ func (c *CrawlCmd) Run() error {
 	}
 
 	bs, err := setupBrowserAndSignals(c.Header, c.CrawlOptions, crawl.CrawlerOptions{
-		Depth:        c.Depth,
-		MaxPages:     c.MaxPages,
-		Timeout:      c.Timeout,
-		Scope:        c.Scope,
-		Headless:     c.Headless,
-		Proxy:        c.Proxy,
-		Concurrency:  c.Concurrency,
-		AllowPrivate: c.DangerousAllowPrivate,
+		Depth:         c.Depth,
+		MaxPages:      c.MaxPages,
+		Timeout:       c.Timeout,
+		Scope:         c.Scope,
+		Headless:      c.Headless,
+		Proxy:         c.Proxy,
+		ProxyInsecure: c.ProxyInsecure,
+		Concurrency:   c.Concurrency,
+		AllowPrivate:  c.DangerousAllowPrivate,
 	})
 	if err != nil {
 		return err
@@ -573,14 +575,15 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	}
 
 	bs, err := setupBrowserAndSignals(c.Header, c.CrawlOptions, crawl.CrawlerOptions{
-		Depth:        c.Depth,
-		MaxPages:     c.MaxPages,
-		Timeout:      c.Timeout,
-		Scope:        c.Scope,
-		Headless:     c.Headless,
-		Proxy:        c.Proxy,
-		Concurrency:  c.Concurrency,
-		AllowPrivate: c.DangerousAllowPrivate,
+		Depth:         c.Depth,
+		MaxPages:      c.MaxPages,
+		Timeout:       c.Timeout,
+		Scope:         c.Scope,
+		Headless:      c.Headless,
+		Proxy:         c.Proxy,
+		ProxyInsecure: c.ProxyInsecure,
+		Concurrency:   c.Concurrency,
+		AllowPrivate:  c.DangerousAllowPrivate,
 	})
 	if err != nil {
 		return err

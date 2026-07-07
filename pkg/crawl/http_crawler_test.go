@@ -37,7 +37,7 @@ import (
 // http.DefaultTransport itself (no override).
 func TestNewHTTPClient_SSRFGuard(t *testing.T) {
 	t.Run("allowPrivate=false uses guarded transport", func(t *testing.T) {
-		c := newHTTPClient(nil, false, 30*time.Second, nil)
+		c := newHTTPClient(nil, false, 30*time.Second, nil, false)
 		if c == nil {
 			t.Fatal("newHTTPClient returned nil")
 		}
@@ -60,7 +60,7 @@ func TestNewHTTPClient_SSRFGuard(t *testing.T) {
 	})
 
 	t.Run("allowPrivate=true uses DefaultTransport", func(t *testing.T) {
-		c := newHTTPClient(nil, true, 30*time.Second, nil)
+		c := newHTTPClient(nil, true, 30*time.Second, nil, false)
 		if c == nil {
 			t.Fatal("newHTTPClient returned nil")
 		}
@@ -71,17 +71,17 @@ func TestNewHTTPClient_SSRFGuard(t *testing.T) {
 	})
 }
 
-// TestNewHTTPClient_Proxy verifies that when a proxy URL is provided the
-// returned client's transport routes through it, disables TLS verification (for
-// intercepting proxies), and does NOT install the SSRF dial guard — so a
-// loopback proxy is reachable (LAB-4011).
+// TestNewHTTPClient_Proxy verifies that when an http proxy URL is provided with
+// the --proxy-insecure opt-in the returned client's transport routes through
+// it, disables TLS verification (for intercepting proxies), and does NOT
+// install the SSRF dial guard — so a loopback proxy is reachable (LAB-4011).
 func TestNewHTTPClient_Proxy(t *testing.T) {
 	proxyURL, err := url.Parse("http://127.0.0.1:8080")
 	if err != nil {
 		t.Fatalf("parse proxy: %v", err)
 	}
 
-	c := newHTTPClient(nil, false, 30*time.Second, proxyURL)
+	c := newHTTPClient(nil, false, 30*time.Second, proxyURL, true)
 	if c == nil {
 		t.Fatal("newHTTPClient returned nil")
 	}
@@ -103,9 +103,10 @@ func TestNewHTTPClient_Proxy(t *testing.T) {
 		t.Errorf("Transport.Proxy(req) = %v, want %s", got, proxyURL)
 	}
 
-	// TLS verification must be disabled for the proxy MITM case.
+	// TLS verification must be disabled for the http-proxy MITM case when the
+	// --proxy-insecure opt-in is set.
 	if tr.TLSClientConfig == nil || !tr.TLSClientConfig.InsecureSkipVerify {
-		t.Error("InsecureSkipVerify = false, want true when proxy is set")
+		t.Error("InsecureSkipVerify = false, want true for http proxy with proxyInsecure=true")
 	}
 
 	// The SSRF dial guard must NOT be installed even with allowPrivate=false,
@@ -130,17 +131,18 @@ func TestNewHTTPClient_Proxy(t *testing.T) {
 }
 
 // TestNewHTTPClient_SOCKS5Proxy verifies that a socks5 proxy keeps normal TLS
-// verification. socks5 is a transparent TCP tunnel, so the Go client does TLS
-// directly with the real target through the tunnel and no substitute CA is
-// involved; disabling verification would remove real protection for no benefit
-// (finding 002).
+// verification even when --proxy-insecure is requested. socks5 is a transparent
+// TCP tunnel, so the Go client does TLS directly with the real target through
+// the tunnel and no substitute CA is involved; disabling verification would
+// remove real protection for no benefit (finding 002). proxyInsecure=true here
+// proves the http/https scheme gate, not just the default.
 func TestNewHTTPClient_SOCKS5Proxy(t *testing.T) {
 	proxyURL, err := url.Parse("socks5://127.0.0.1:1080")
 	if err != nil {
 		t.Fatalf("parse proxy: %v", err)
 	}
 
-	c := newHTTPClient(nil, false, 30*time.Second, proxyURL)
+	c := newHTTPClient(nil, false, 30*time.Second, proxyURL, true)
 	if c == nil {
 		t.Fatal("newHTTPClient returned nil")
 	}
@@ -154,9 +156,35 @@ func TestNewHTTPClient_SOCKS5Proxy(t *testing.T) {
 		t.Fatal("Transport.Proxy = nil, want configured proxy func")
 	}
 
-	// TLS verification must NOT be disabled for socks5 (no MITM CA involved).
+	// TLS verification must NOT be disabled for socks5 (no MITM CA involved),
+	// even with proxyInsecure=true.
 	if tr.TLSClientConfig != nil && tr.TLSClientConfig.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify = true for socks5 proxy, want normal verification kept")
+	}
+}
+
+// TestNewHTTPClient_ProxySecureByDefault verifies that an http proxy WITHOUT the
+// --proxy-insecure opt-in keeps TLS verification on: no TLSClientConfig with
+// InsecureSkipVerify is installed. This is the default posture (LAB-4011).
+func TestNewHTTPClient_ProxySecureByDefault(t *testing.T) {
+	proxyURL, err := url.Parse("http://127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("parse proxy: %v", err)
+	}
+
+	c := newHTTPClient(nil, false, 30*time.Second, proxyURL, false)
+	if c == nil {
+		t.Fatal("newHTTPClient returned nil")
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", c.Transport)
+	}
+	if tr.Proxy == nil {
+		t.Fatal("Transport.Proxy = nil, want configured proxy func")
+	}
+	if tr.TLSClientConfig != nil && tr.TLSClientConfig.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify = true for http proxy without --proxy-insecure, want verification kept")
 	}
 }
 

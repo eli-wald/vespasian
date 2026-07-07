@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1123,20 +1124,58 @@ func TestDangerousAllowPrivate_WarningOnlyWhenProbing(t *testing.T) {
 	})
 }
 
-// TestDoCrawl_ProxyHonoredWithoutHeadless verifies the HTTP backend no longer
-// warns-and-clears --proxy when headless mode is disabled (LAB-4011). The proxy
-// (loopback, nothing listening) makes the fetch fail, but the crawl returns
-// gracefully; the key assertion is that the old warn-and-clear message is gone.
+// TestDoCrawl_ProxyHonoredWithoutHeadless verifies that on the HTTP backend
+// (--headless=false) doCrawl no longer warns-and-clears --proxy AND actually
+// routes the crawl through the configured proxy (LAB-4011). A loopback
+// recording proxy forwards to a loopback origin; a non-zero hit count proves
+// the crawl path honored --proxy rather than silently ignoring it.
 func TestDoCrawl_ProxyHonoredWithoutHeadless(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html><body>ok</body></html>")
+	}))
+	defer origin.Close()
+
+	// Minimal recording forward proxy on loopback: counts hits and forwards the
+	// (plain http) request to the origin.
+	var proxied atomic.Int64
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied.Add(1)
+		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.RequestURI, nil) //nolint:gosec // test proxy forwards the received request URI
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		resp, err := http.DefaultTransport.RoundTrip(outReq)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close() //nolint:errcheck // test cleanup
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body) //nolint:gosec // test best-effort
+	}))
+	defer proxy.Close()
+
 	var buf bytes.Buffer
 	opts := crawl.CrawlerOptions{
 		Headless: false,
-		Proxy:    "http://127.0.0.1:8080",
-		Timeout:  5 * time.Second,
+		Proxy:    proxy.URL,
+		MaxPages: 1,
+		Timeout:  10 * time.Second,
+		// The loopback origin passes the upfront scope check; --proxy relaxes
+		// only the dial-time SSRF pin, not URL scope, so AllowPrivate is needed.
+		AllowPrivate: true,
 	}
-	_, _ = doCrawl(context.Background(), &buf, "https://example.com", opts)
+	_, err := doCrawl(context.Background(), &buf, origin.URL, opts)
+	if err != nil {
+		t.Fatalf("doCrawl error = %v", err)
+	}
 	if strings.Contains(buf.String(), "only supported with headless browser mode") {
 		t.Errorf("stderr still carries the removed warn-and-clear message: %q", buf.String())
+	}
+	if proxied.Load() == 0 {
+		t.Error("proxy was not used; doCrawl did not route the crawl through --proxy")
 	}
 }
 
@@ -1160,10 +1199,14 @@ func TestDoCrawl_InvalidProxyRejected(t *testing.T) {
 	if !strings.Contains(err.Error(), "embedded credentials") {
 		t.Errorf("error = %q, want containing %q", err.Error(), "embedded credentials")
 	}
-	// The credentials must not leak to stderr (the port-less warning that would
-	// have printed opts.Proxy must never run for an invalid proxy).
-	if strings.Contains(buf.String(), "s3cret") || strings.Contains(err.Error(), "s3cret") {
-		t.Errorf("credentials leaked: stderr=%q err=%v", buf.String(), err)
+	// Neither the username nor the password may leak to stderr or the error
+	// (the port-less warning that would have printed opts.Proxy must never run
+	// for an invalid proxy). Both halves of the fixture credential are checked.
+	stderr := buf.String()
+	errMsg := err.Error()
+	if strings.Contains(stderr, "admin") || strings.Contains(stderr, "s3cret") ||
+		strings.Contains(errMsg, "admin") || strings.Contains(errMsg, "s3cret") {
+		t.Errorf("credentials leaked: stderr=%q err=%v", stderr, errMsg)
 	}
 }
 

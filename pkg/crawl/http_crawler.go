@@ -34,18 +34,20 @@ import (
 // redirectScopeGuard(scopeFn):
 //
 //   - proxyURL != nil: a clone of http.DefaultTransport with Proxy set to the
-//     given URL. TLS certificate verification is disabled because intercepting
-//     proxies (Burp, mitmproxy) present their own CA for HTTPS MITM, and the
-//     dial-time SSRF guard (ssrfSafeDialContext) is deliberately NOT installed:
-//     with a proxy the client dials the proxy (commonly loopback), not the
-//     target, so pinning the dialed IP would block the proxy and offers no
-//     target protection. Target scope stays enforced at the URL level by the
-//     upfront scope/SSRF check and redirectScopeGuard. (LAB-4011.)
+//     given URL. TLS certificate verification stays ON by default; it is
+//     disabled only when proxyInsecure is set AND the proxy is http/https,
+//     the explicit opt-in for an intercepting proxy (Burp, mitmproxy) that
+//     presents its own CA for HTTPS MITM. The dial-time SSRF guard
+//     (ssrfSafeDialContext) is deliberately NOT installed: with a proxy the
+//     client dials the proxy (commonly loopback), not the target, so pinning
+//     the dialed IP would block the proxy and offers no target protection.
+//     Target scope stays enforced at the URL level by the upfront scope/SSRF
+//     check and redirectScopeGuard. (LAB-4011.)
 //   - proxyURL == nil, allowPrivate false: a clone of http.DefaultTransport
 //     with DialContext wired to ssrfSafeDialContext so the DNS-rebinding TOCTOU
 //     window is closed at connect time (SEC-BE-002).
 //   - proxyURL == nil, allowPrivate true: http.DefaultTransport unchanged.
-func newHTTPClient(scopeFn func(string) bool, allowPrivate bool, timeout time.Duration, proxyURL *url.URL) *http.Client {
+func newHTTPClient(scopeFn func(string) bool, allowPrivate bool, timeout time.Duration, proxyURL *url.URL, proxyInsecure bool) *http.Client {
 	transport := http.RoundTripper(http.DefaultTransport)
 	switch {
 	case proxyURL != nil:
@@ -57,18 +59,17 @@ func newHTTPClient(scopeFn func(string) bool, allowPrivate bool, timeout time.Du
 		}
 		t := base.Clone()
 		t.Proxy = http.ProxyURL(proxyURL)
-		// http/https intercepting proxies (Burp, mitmproxy) terminate TLS and
-		// present their own CA for the target, so verification must be disabled
-		// for that substitute certificate to be accepted. Unlike Chrome on the
-		// headless path (which validates against the OS trust store and so
-		// requires the operator to trust the proxy CA out-of-band), the Go
-		// client has no trust store to fall back on, so this is the only way to
-		// let intercepted HTTPS through. socks5 is a transparent TCP tunnel: the
-		// Go client performs TLS directly with the real target through the
-		// tunnel and no substitute CA is involved, so normal verification is
-		// kept for socks5.
-		if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-			t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // G402: intentional for http/https proxy MITM (see doc comment)
+		// TLS verification stays on by default. It is disabled only when the
+		// operator explicitly opts in via --proxy-insecure AND the proxy is
+		// http/https: an intercepting proxy (Burp, mitmproxy) terminates TLS and
+		// presents its own CA for the target, so verification must be off for
+		// that substitute certificate to be accepted, and the Go client has no
+		// OS trust store to fall back on the way headless Chrome does. socks5 is
+		// a transparent TCP tunnel: the Go client performs TLS directly with the
+		// real target through the tunnel and no substitute CA is involved, so
+		// verification is always kept for socks5 regardless of proxyInsecure.
+		if proxyInsecure && (proxyURL.Scheme == "http" || proxyURL.Scheme == "https") {
+			t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // G402: opt-in via --proxy-insecure for http/https proxy MITM (see doc comment)
 		}
 		transport = t
 	case !allowPrivate:
@@ -156,7 +157,7 @@ func (c *HTTPCrawler) Crawl(ctx context.Context, targetURL string) ([]ObservedRe
 	// explicit Client.Timeout provides defense-in-depth if the context is ever
 	// mis-wired on a future code path (SEC-BE-001). Both use c.pageTimeout so
 	// they track the same source (QUAL-004).
-	client := newHTTPClient(scopeFn, c.opts.AllowPrivate, c.pageTimeout, proxyURL)
+	client := newHTTPClient(scopeFn, c.opts.AllowPrivate, c.pageTimeout, proxyURL, c.opts.ProxyInsecure)
 
 	// Seed the frontier. Reject if the seed itself doesn't pass scope/SSRF.
 	if frontier.Push([]urlEntry{{URL: targetURL, Depth: 0}}) == 0 {
