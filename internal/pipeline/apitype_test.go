@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/praetorian-inc/vespasian/internal/pipeline"
+	"github.com/praetorian-inc/vespasian/pkg/classify"
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
 	"github.com/praetorian-inc/vespasian/pkg/probe"
 )
@@ -56,6 +57,16 @@ func TestStrategiesForType(t *testing.T) {
 				t.Helper()
 				_, ok := s.(*probe.GraphQLProbe)
 				assert.True(t, ok, "expected *probe.GraphQLProbe, got %T", s)
+			},
+		},
+		{
+			name:    "gRPC returns one GRPCProbe",
+			apiType: pipeline.APITypeGRPC,
+			wantLen: 1,
+			checkFirst: func(t *testing.T, s probe.ProbeStrategy) {
+				t.Helper()
+				_, ok := s.(*probe.GRPCProbe)
+				assert.True(t, ok, "expected *probe.GRPCProbe, got %T", s)
 			},
 		},
 		{
@@ -137,6 +148,7 @@ func TestClassifiersForType_KnownTypes(t *testing.T) {
 		{pipeline.APITypeREST, 1},
 		{pipeline.APITypeWSDL, 1},
 		{pipeline.APITypeGraphQL, 1},
+		{pipeline.APITypeGRPC, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.apiType, func(t *testing.T) {
@@ -144,6 +156,16 @@ func TestClassifiersForType_KnownTypes(t *testing.T) {
 			require.Len(t, classifiers, tt.wantLen)
 		})
 	}
+}
+
+// TestClassifiersForType_GRPC pins the concrete classifier type returned for the
+// gRPC branch. A length-only check (see TestClassifiersForType_KnownTypes) would
+// not catch a wrong classifier type wired into the switch.
+func TestClassifiersForType_GRPC(t *testing.T) {
+	classifiers := pipeline.ClassifiersForType(pipeline.APITypeGRPC)
+	require.Len(t, classifiers, 1)
+	_, ok := classifiers[0].(*classify.GRPCClassifier)
+	assert.True(t, ok, "expected *classify.GRPCClassifier, got %T", classifiers[0])
 }
 
 func TestClassifiersForType_UnknownReturnsNil(t *testing.T) {

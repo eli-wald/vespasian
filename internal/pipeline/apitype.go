@@ -87,7 +87,7 @@ func ClassifiersForType(apiType string) []classify.APIClassifier {
 
 // StrategiesForType returns the probe strategies for the given API type.
 // REST (and the default) get OPTIONS + Schema probes; WSDL gets WSDL probe;
-// GraphQL gets GraphQL probe.
+// GraphQL gets GraphQL probe; gRPC gets the gRPC reflection probe.
 func StrategiesForType(apiType string, cfg probe.Config) []probe.ProbeStrategy {
 	switch apiType {
 	case APITypeWSDL:

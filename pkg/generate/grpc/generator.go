@@ -29,6 +29,14 @@ import (
 	"github.com/praetorian-inc/vespasian/pkg/classify"
 )
 
+// These mirror the probe-path caps (pkg/probe/grpc.go) so the offline
+// `generate` entry point shares the same descriptor-count and aggregate-byte
+// bounds instead of trusting capture-file provenance (SEC-BE-001).
+const (
+	maxGRPCFileDescriptors = 1000
+	maxGRPCDescriptorBytes = 64 << 20 // 64 MiB
+)
+
 // Generator produces .proto specifications from classified gRPC requests.
 type Generator struct{}
 
@@ -74,6 +82,17 @@ func (g *Generator) Generate(endpoints []classify.ClassifiedRequest) ([]byte, er
 
 	if len(merged) == 0 {
 		return nil, errors.New("gRPC spec generation requires server reflection; no FileDescriptors available")
+	}
+
+	if len(merged) > maxGRPCFileDescriptors {
+		return nil, fmt.Errorf("too many gRPC file descriptors: %d (max %d)", len(merged), maxGRPCFileDescriptors)
+	}
+	var totalBytes int
+	for _, raw := range merged {
+		totalBytes += len(raw)
+	}
+	if totalBytes > maxGRPCDescriptorBytes {
+		return nil, fmt.Errorf("gRPC file descriptors too large: %d bytes (max %d)", totalBytes, maxGRPCDescriptorBytes)
 	}
 
 	return renderProto(merged)

@@ -30,7 +30,7 @@ import (
 
 // Options configures ClassifyProbeGenerate.
 type Options struct {
-	// APIType is one of APITypeREST, APITypeWSDL, APITypeGraphQL.
+	// APIType is one of APITypeREST, APITypeWSDL, APITypeGraphQL, APITypeGRPC.
 	APIType string
 
 	// Confidence is the classifier match threshold (0.0-1.0).

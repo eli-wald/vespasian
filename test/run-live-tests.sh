@@ -672,6 +672,27 @@ PYEOF
         log_ok "Proto validation: $validation_result"
     fi
 
+    # AC4 (LAB-2778): prove the emitted .proto actually compiles with protoc,
+    # not just that it matches the expected service/method shapes textually.
+    if command -v protoc >/dev/null 2>&1; then
+        if grep -q '^// ---$' "$spec_file"; then
+            # renderProto concatenates multiple reflection files into one output
+            # separated by "// ---"; protoc cannot compile a multi-file blob from a
+            # single input. The lab target emits a single file, so this branch is
+            # only a guard for future multi-file targets.
+            log_info "Skipping protoc compile: emitted spec is multi-file (concatenated)"
+        elif protoc --proto_path="$target_dir" --descriptor_set_out=/dev/null \
+            "$(basename "$spec_file")" 2>/tmp/protoc-grpc.err; then
+            log_ok "protoc compiled emitted .proto successfully"
+        else
+            log_fail "protoc failed to compile emitted .proto:"
+            cat /tmp/protoc-grpc.err >&2
+            failures=$((failures + 1))
+        fi
+    else
+        log_info "protoc not installed — skipping .proto compile check (AC4)"
+    fi
+
     local expected_count
     expected_count=$(json_field "$expected" total_services)
 
