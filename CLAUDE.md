@@ -101,10 +101,10 @@ The `query_params` field is `map[string][]string` (multi-value). Capture files g
 
 | Command   | Purpose |
 |-----------|---------|
-| `scan`    | Full pipeline: crawl + classify + probe + generate. Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default true), `--merge-slugs` (default false), `--slug-threshold` (default 2) |
+| `scan`    | Full pipeline: crawl + classify + probe + generate. Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default true), `--merge-slugs` (default false), `--slug-threshold` (default 2), `--grpc-insecure-skip-verify` (default false; opt-in TLS trust-chain skip for gRPC reflection) |
 | `crawl`   | Capture traffic via headless browser → capture.json. Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default true) |
 | `import`  | Convert Burp XML / HAR / mitmproxy → capture.json |
-| `generate` | Produce spec from capture.json (REST→OpenAPI, GraphQL→SDL, WSDL→WSDL, gRPC→`.proto`). Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default false), `--merge-slugs` (default false), `--slug-threshold` (default 2). `grpc` must be passed explicitly and needs reflection descriptors in the capture. |
+| `generate` | Produce spec from capture.json (REST→OpenAPI, GraphQL→SDL, WSDL→WSDL, gRPC→`.proto`). Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default false), `--merge-slugs` (default false), `--slug-threshold` (default 2), `--grpc-insecure-skip-verify` (default false). `grpc` must be passed explicitly; unlike the other types it is **not** fully offline — descriptors are not stored in the capture (`FileDescriptors` is `json:"-"`), so `generate grpc` re-runs the reflection probe live against the gRPC targets in the capture (needs `--probe`, on by default, and target reachability). |
 | `version` | Show version information |
 
 ## Test Infrastructure

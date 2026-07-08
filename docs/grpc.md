@@ -40,14 +40,21 @@ first positional argument (`generate <api-type> <capture>`).
 # Full pipeline against a live target (--api-type is a flag on scan).
 vespasian scan https://api.example.com:443 --api-type grpc -o service.proto
 
-# Offline: generate from a capture (api-type is positional on generate).
+# Generate from a capture (api-type is positional on generate). Note: this
+# re-probes the live gRPC targets recorded in the capture — see below.
 vespasian generate grpc capture.json -o service.proto
 ```
 
-`generate grpc` requires reflection descriptors in the capture (see
-[Generator](#generator) below); traffic-only inference is not yet implemented,
-so a capture without descriptors yields no spec. During `scan`, those
-descriptors are produced live by the reflection probe.
+Unlike REST/GraphQL/WSDL, `generate grpc` is **not** a purely offline step and
+does not read reflection descriptors from the capture file.
+`GRPCReflectionResult.FileDescriptors` is tagged `json:"-"`, so descriptors are
+never serialized into `capture.json` (which stores only
+`[]crawl.ObservedRequest`). Instead, `generate grpc` re-runs the reflection
+probe live against the gRPC targets recorded in the capture, so it requires
+`--probe` (on by default) and network reachability to those targets at generate
+time. Traffic-only inference is not yet implemented, so a capture whose targets
+are unreachable — or run with `--probe=false` — yields no spec. During `scan`,
+the same descriptors are produced live by the reflection probe in a single pass.
 
 ## Classification
 

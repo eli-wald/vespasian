@@ -403,9 +403,6 @@ func TestGenerator_Generate_ConflictingDescriptorsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "conflicting file descriptors")
 }
 
-// TestGenerator_Generate_IdenticalDescriptorsDedup verifies that two endpoints
-// carrying the same filename with identical bytes do not trigger a conflict —
-// the generator deduplicates them and produces valid output.
 // TestGenerator_Generate_TooManyDescriptorsErrors verifies that Generate
 // rejects a merged descriptor set exceeding maxGRPCFileDescriptors before it
 // ever attempts to unmarshal the (arbitrary, non-descriptor) bytes.
@@ -461,6 +458,43 @@ func TestGenerator_Generate_DescriptorsExceedByteCapErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "too large")
 }
 
+// TestGenerator_Generate_MalformedDescriptorErrors verifies that Generate
+// surfaces a proto.Unmarshal failure on a descriptor blob that is non-empty and
+// within both the count and byte caps but is not valid protobuf wire format.
+// This pins the "unmarshal file descriptor" error branch in renderProto, which
+// is reachable from the offline `generate` command when a capture carries
+// corrupt/truncated descriptor bytes.
+func TestGenerator_Generate_MalformedDescriptorErrors(t *testing.T) {
+	g := &Generator{}
+	// 0x0A = field 1, wire type 2 (length-delimited); the 0x05 length prefix
+	// promises 5 payload bytes that are absent, so proto.Unmarshal fails while
+	// the 2-byte blob still passes the count and aggregate-byte caps.
+	endpoints := []classify.ClassifiedRequest{
+		{
+			APIType: "grpc",
+			GRPCSchema: &classify.GRPCReflectionResult{
+				ReflectionEnabled: true,
+				FileDescriptors:   map[string][]byte{"broken.proto": {0x0A, 0x05}},
+			},
+		},
+	}
+	spec, err := g.Generate(endpoints)
+	require.Error(t, err)
+	assert.Empty(t, spec)
+	assert.Contains(t, err.Error(), "unmarshal file descriptor")
+}
+
+// TestSanitizeComment verifies control characters (notably CR/LF) are stripped
+// so a hostile descriptor filename cannot inject extra lines into a // comment.
+func TestSanitizeComment(t *testing.T) {
+	assert.Equal(t, "evil.protoINJECTED", sanitizeComment("evil.proto\nINJECTED"))
+	assert.Equal(t, "abc", sanitizeComment("a\r\nb\tc"))
+	assert.Equal(t, "clean.proto", sanitizeComment("clean.proto"))
+}
+
+// TestGenerator_Generate_IdenticalDescriptorsDedup verifies that two endpoints
+// carrying the same filename with identical bytes do not trigger a conflict —
+// the generator deduplicates them and produces valid output.
 func TestGenerator_Generate_IdenticalDescriptorsDedup(t *testing.T) {
 	g := &Generator{}
 	raw := fileDescriptorBytes(t)

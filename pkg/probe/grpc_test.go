@@ -369,6 +369,42 @@ func TestGRPCProbe_Probe_FailsClosedOnValidator(t *testing.T) {
 	assert.Nil(t, result[0].GRPCSchema, "blocked target should not produce a schema")
 }
 
+// TestGRPCProbe_Probe_NilSchemaOnUnreachableTarget pins the nil-return branch of
+// runReflection: an endpoint classified as gRPC whose target passes the URL
+// validator but is NOT a live gRPC server (here a closed loopback port) must
+// yield GRPCSchema==nil and no error — no false schema, no crash. Unlike
+// TestGRPCProbe_Probe_FailsClosedOnValidator (returns before dialing) and
+// TestGRPCProbe_Probe_SkipsNonGRPCEndpoints (never dials), this drives the
+// dial/reflection path and asserts the ambiguous-network-error -> nil outcome.
+func TestGRPCProbe_Probe_NilSchemaOnUnreachableTarget(t *testing.T) {
+	// Bind then immediately close a loopback listener to obtain a routable but
+	// guaranteed-closed port (nothing listening).
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := lis.Addr().String()
+	require.NoError(t, lis.Close())
+
+	cfg := Config{
+		Timeout:      2 * time.Second,
+		URLValidator: func(string) error { return nil }, // passes SSRF preflight
+		Dialer:       loopbackDialer,                    // real dial to the closed port
+	}
+	probe := NewGRPCProbe(cfg)
+
+	endpoints := []classify.ClassifiedRequest{
+		{APIType: "grpc"},
+	}
+	endpoints[0].URL = "http://" + addr + "/lab.v1.UserService/GetUser"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := probe.Probe(ctx, endpoints)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Nil(t, result[0].GRPCSchema, "a reachable-but-non-gRPC / unreachable target must yield a nil schema and no error")
+}
+
 // TestGRPCProbe_Probe_DedupsByTarget verifies that multiple endpoints sharing
 // the same host:port produce a single reflection call and that all matching
 // endpoints receive the SAME *classify.GRPCReflectionResult pointer (pointer

@@ -278,6 +278,17 @@ func runReflection(ctx context.Context, client *grpcreflect.Client, t grpcTarget
 		if reflectionServices[svcName] {
 			continue
 		}
+		// ListServices() output is attacker-controlled: a hostile reflection
+		// server can advertise an unbounded number of distinct services. Once
+		// the retained-descriptor budget is spent, stop issuing further
+		// FileContainingSymbol RPCs (each of which resolves and holds a file
+		// plus its transitive dependency closure), so peak memory stays bounded
+		// by the count/byte caps rather than by the advertised service count.
+		if len(fetched) >= maxGRPCFileDescriptors || totalBytes >= maxGRPCDescriptorBytes {
+			slog.DebugContext(ctx, "grpc probe: descriptor budget exhausted; stopping service enumeration",
+				"target", t.hostPort, "services_discovered", len(result.Services))
+			break
+		}
 		fd, err := client.FileContainingSymbol(svcName)
 		if err != nil {
 			slog.DebugContext(ctx, "grpc probe: FileContainingSymbol failed", "service", svcName, "error", err)

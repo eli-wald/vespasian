@@ -138,7 +138,7 @@ func renderProto(fileDescriptors map[string][]byte) ([]byte, error) {
 	if len(skipped) > 0 {
 		fmt.Fprintf(&buf, "// WARNING: %d .proto file(s) omitted due to unresolved imports or link errors:\n", len(skipped))
 		for _, s := range skipped {
-			fmt.Fprintf(&buf, "//   - %s\n", s)
+			fmt.Fprintf(&buf, "//   - %s\n", sanitizeComment(s))
 		}
 		buf.WriteString("\n")
 	}
@@ -219,4 +219,17 @@ func buildDescriptorGraph(fdProtos []*descriptorpb.FileDescriptorProto) (map[str
 		return nil, nil, fmt.Errorf("build descriptor graph: %w", strictErr)
 	}
 	return resolved, skipped, nil
+}
+
+// sanitizeComment strips CR/LF and other control characters from a
+// reflection-derived string before it is embedded in a // comment, so a
+// hostile descriptor filename cannot inject additional lines into the emitted
+// .proto artifact (which is later fed to protoc).
+func sanitizeComment(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == 0x7f || r < 0x20 {
+			return -1
+		}
+		return r
+	}, s)
 }
