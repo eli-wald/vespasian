@@ -276,6 +276,8 @@ The probe enumerates a target's services, methods, and message types via the [gR
 - **SSRF protection**: the dial target is validated before connecting and re-checked at connect time (closing the DNS-rebinding TOCTOU window), the same as the HTTP probe path.
 - **TLS targets**: certificates are verified by default. Internal gRPC services often present self-signed or internal-CA certs; to enumerate those, pass `--grpc-insecure-skip-verify` to skip verification (SSRF is still enforced by the dialer regardless). Without the flag, a target whose cert fails verification is not enumerated.
 
+For a deeper reference on gRPC support — classification signals, reflection probe behavior, `.proto` generation, TLS, and end-to-end examples — see [docs/grpc.md](docs/grpc.md). A step-by-step tutorial lives on the [gRPC API Discovery](https://github.com/praetorian-inc/vespasian/wiki/gRPC-API-Discovery) wiki page.
+
 ## CLI Reference
 
 ### `vespasian scan`
