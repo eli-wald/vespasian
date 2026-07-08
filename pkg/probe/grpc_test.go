@@ -455,6 +455,55 @@ func TestGRPCProbe_Probe_ReflectionBudgetStopsEnumeration(t *testing.T) {
 	assert.Equal(t, 1, len(schema.Services), "budget break must stop enumeration after the cap is hit")
 }
 
+// TestGRPCProbe_Probe_ReflectionByteBudgetStopsEnumeration pins the byte-cap
+// half of the SEC-BE-002 loop-break in runReflection (the count half is pinned
+// by TestGRPCProbe_Probe_ReflectionBudgetStopsEnumeration). It registers two
+// non-reflection services and sets MaxReflectionDescriptorBytes to 1, so once
+// the first service's descriptors push totalBytes past the 1-byte budget the
+// loop breaks on the next iteration and exactly one service is enumerated.
+func TestGRPCProbe_Probe_ReflectionByteBudgetStopsEnumeration(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	s := grpc.NewServer()
+	healthpb.RegisterHealthServer(s, health.NewServer())
+	labpb.RegisterUserServiceServer(s, labpb.UnimplementedUserServiceServer{})
+	reflection.Register(s)
+	go func() {
+		_ = s.Serve(lis)
+	}()
+	defer s.Stop()
+
+	cfg := Config{
+		Timeout:                      5 * time.Second,
+		URLValidator:                 func(string) error { return nil },
+		Dialer:                       loopbackDialer,
+		MaxReflectionDescriptorBytes: 1, // trip the byte-budget break after the first service
+	}
+	probe := NewGRPCProbe(cfg)
+
+	endpoints := []classify.ClassifiedRequest{
+		{APIType: "grpc"},
+	}
+	endpoints[0].URL = "http://" + lis.Addr().String() + "/grpc.health.v1.Health/Check"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := probe.Probe(ctx, endpoints)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+
+	schema := result[0].GRPCSchema
+	require.NotNil(t, schema, "GRPCSchema should be populated")
+	require.True(t, schema.ReflectionEnabled, "reflection must be enabled")
+
+	// Two non-reflection services are registered, but the 1-byte descriptor
+	// budget stops enumeration after the first service's descriptors are
+	// retained, so exactly one service is extracted.
+	assert.Equal(t, 1, len(schema.Services), "byte-budget break must stop enumeration after the cap is hit")
+}
+
 // TestGRPCProbe_Probe_DedupsByTarget verifies that multiple endpoints sharing
 // the same host:port produce a single reflection call and that all matching
 // endpoints receive the SAME *classify.GRPCReflectionResult pointer (pointer
