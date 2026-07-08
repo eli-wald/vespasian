@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/praetorian-inc/vespasian/internal/pipeline"
+	"github.com/praetorian-inc/vespasian/pkg/classify"
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
 	"github.com/praetorian-inc/vespasian/pkg/probe"
 )
@@ -56,6 +57,16 @@ func TestStrategiesForType(t *testing.T) {
 				t.Helper()
 				_, ok := s.(*probe.GraphQLProbe)
 				assert.True(t, ok, "expected *probe.GraphQLProbe, got %T", s)
+			},
+		},
+		{
+			name:    "gRPC returns one GRPCProbe",
+			apiType: pipeline.APITypeGRPC,
+			wantLen: 1,
+			checkFirst: func(t *testing.T, s probe.ProbeStrategy) {
+				t.Helper()
+				_, ok := s.(*probe.GRPCProbe)
+				assert.True(t, ok, "expected *probe.GRPCProbe, got %T", s)
 			},
 		},
 		{
@@ -137,6 +148,7 @@ func TestClassifiersForType_KnownTypes(t *testing.T) {
 		{pipeline.APITypeREST, 1},
 		{pipeline.APITypeWSDL, 1},
 		{pipeline.APITypeGraphQL, 1},
+		{pipeline.APITypeGRPC, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.apiType, func(t *testing.T) {
@@ -144,6 +156,16 @@ func TestClassifiersForType_KnownTypes(t *testing.T) {
 			require.Len(t, classifiers, tt.wantLen)
 		})
 	}
+}
+
+// TestClassifiersForType_GRPC pins the concrete classifier type returned for the
+// gRPC branch. A length-only check (see TestClassifiersForType_KnownTypes) would
+// not catch a wrong classifier type wired into the switch.
+func TestClassifiersForType_GRPC(t *testing.T) {
+	classifiers := pipeline.ClassifiersForType(pipeline.APITypeGRPC)
+	require.Len(t, classifiers, 1)
+	_, ok := classifiers[0].(*classify.GRPCClassifier)
+	assert.True(t, ok, "expected *classify.GRPCClassifier, got %T", classifiers[0])
 }
 
 func TestClassifiersForType_UnknownReturnsNil(t *testing.T) {
@@ -157,6 +179,33 @@ func TestClassifiersForType_UnknownReturnsNil(t *testing.T) {
 // 0.80) classifiers at threshold 0.5, producing wsdlCount=1 and restCount=1.
 // The `>=` tie-breaker is what makes WSDL win in that case.
 // ---------------------------------------------------------------------------
+
+// TestDetectAPIType_NeverAutoSelectsGRPC pins the opt-in invariant: gRPC is
+// never auto-selected by DetectAPIType, even when a request scores 0.99 on
+// classify.GRPCClassifier (gRPC content-type + trailer header). Callers must
+// pass --api-type grpc explicitly.
+func TestDetectAPIType_NeverAutoSelectsGRPC(t *testing.T) {
+	req := crawl.ObservedRequest{
+		Method:  "POST",
+		URL:     "https://x.com/pkg.Service/Method",
+		Headers: map[string]string{"Content-Type": "application/grpc"},
+		Response: crawl.ObservedResponse{
+			StatusCode:  200,
+			ContentType: "application/grpc",
+			Headers:     map[string]string{"grpc-status": "0"},
+		},
+	}
+
+	// Confirm the request actually scores 0.99 on the gRPC classifier, so the
+	// test is exercising the intended gRPC-shaped signal.
+	isAPI, confidence := (&classify.GRPCClassifier{}).Classify(req)
+	require.True(t, isAPI)
+	require.InDelta(t, 0.99, confidence, 0.0001)
+
+	got := pipeline.DetectAPIType([]crawl.ObservedRequest{req}, 0.5)
+	assert.Equal(t, pipeline.APITypeREST, got)
+	assert.NotEqual(t, pipeline.APITypeGRPC, got)
+}
 
 func TestDetectAPIType_PrefersWSDL(t *testing.T) {
 	requests := []crawl.ObservedRequest{

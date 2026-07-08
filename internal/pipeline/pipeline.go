@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -29,7 +30,7 @@ import (
 
 // Options configures ClassifyProbeGenerate.
 type Options struct {
-	// APIType is one of APITypeREST, APITypeWSDL, APITypeGraphQL.
+	// APIType is one of APITypeREST, APITypeWSDL, APITypeGraphQL, APITypeGRPC.
 	APIType string
 
 	// Confidence is the classifier match threshold (0.0-1.0).
@@ -43,6 +44,11 @@ type Options struct {
 
 	// AllowPrivate disables SSRF protection on probes (allow private/internal IPs).
 	AllowPrivate bool
+
+	// GRPCInsecureSkipVerify skips TLS certificate verification when probing
+	// gRPC server reflection over TLS (for self-signed/internal-CA targets).
+	// SSRF protection is still enforced by the dialer regardless.
+	GRPCInsecureSkipVerify bool
 
 	// MergeSlugs enables observation-based slug merging in REST path
 	// normalization. Ignored by the wsdl/graphql generators.
@@ -98,6 +104,7 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 
 	if opts.Probe {
 		cfg := probe.DefaultConfig()
+		cfg.GRPCInsecureSkipVerify = opts.GRPCInsecureSkipVerify
 		if opts.AllowPrivate {
 			cfg.URLValidator = func(string) error { return nil }
 			cfg.Client = &http.Client{
@@ -109,6 +116,10 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 					TLSHandshakeTimeout:   10 * time.Second,
 					ResponseHeaderTimeout: 10 * time.Second,
 				},
+			}
+			cfg.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
 			}
 		}
 		strategies := StrategiesForType(opts.APIType, cfg)

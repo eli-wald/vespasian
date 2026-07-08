@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Vespasian is an API discovery and specification generation tool for security assessments. It captures HTTP traffic through headless browser crawling or imports it from existing sources (Burp Suite XML, HAR, mitmproxy), classifies requests by API type (REST, GraphQL, SOAP/WSDL), probes discovered endpoints, and generates specifications in the native format for each type: OpenAPI 3.0, GraphQL SDL, or WSDL.
+Vespasian is an API discovery and specification generation tool for security assessments. It captures HTTP traffic through headless browser crawling or imports it from existing sources (Burp Suite XML, HAR, mitmproxy), classifies requests by API type (REST, GraphQL, SOAP/WSDL, gRPC), probes discovered endpoints, and generates specifications in the native format for each type: OpenAPI 3.0, GraphQL SDL, WSDL, or `.proto`. gRPC is opt-in (`--api-type grpc`) since its binary HTTP/2 framing is not auto-detected.
 
 ## Build and Test Commands
 
@@ -47,7 +47,7 @@ make clean                    # Remove bin/, dist/, coverage.out
 Vespasian separates traffic capture from specification generation:
 
 1. **Capture**: Crawl a target with a headless browser or import traffic from Burp/HAR/mitmproxy → produces `capture.json` (array of `ObservedRequest`)
-2. **Generate**: Classify requests → probe endpoints → generate specification (OpenAPI 3.0, GraphQL SDL, or WSDL)
+2. **Generate**: Classify requests → probe endpoints → generate specification (OpenAPI 3.0, GraphQL SDL, WSDL, or `.proto`)
 
 The `scan` command combines both stages. The `crawl`/`import` and `generate` commands run them independently.
 
@@ -60,8 +60,10 @@ The CLI (`cmd/vespasian`) uses Kong for argument parsing. Each command (crawl, i
 3. Auto-detect API type (or use explicit `--api-type`)
 4. Classify requests via `classify.RunClassifiers()` with confidence threshold
 5. Deduplicate classified endpoints
-6. Probe endpoints via `probe.RunStrategies()` (OPTIONS, schema, WSDL fetch, GraphQL introspection)
+6. Probe endpoints via `probe.RunStrategies()` (OPTIONS, schema, WSDL fetch, GraphQL introspection, gRPC reflection)
 7. Generate spec via `generate.Get(apiType).Generate()`
+
+Note: `detectAPIType` (auto mode) runs only the REST/WSDL/GraphQL classifiers — gRPC is never auto-selected and requires explicit `--api-type grpc`.
 
 ### Key Packages
 
@@ -70,21 +72,23 @@ The CLI (`cmd/vespasian`) uses Kong for argument parsing. Each command (crawl, i
 - **pkg/crawl**: Two crawler backends — headless mode uses go-rod to drive Chrome tabs (full JS/SPA support); non-headless mode uses a stdlib net/http engine with DFS frontier, 150 rps rate limiter, and scope+SSRF redirect guard. Both produce `ObservedRequest` values. Also owns capture file I/O and browser manager lifecycle, and the post-crawl JS-replay step (`ReplayJSExtracted`) that rescans captured JS bundles for API paths and probes them with raw HTTP under same-origin and SSRF protections. JS-replay is driven by the `scan` pipeline only — it re-fetches bundles and probes the live target, so it requires a target URL and does not run in the offline `generate` command (which has no target URL). Offline JS analysis in `generate` is handled separately by `pkg/analyze/jsstatic` via `--analyze-js`. The extractor reconstructs paths from quoted strings, template literals, full URLs, service-prefix concatenation, and `String.prototype.concat`/`+`-string concatenation (substituting a numeric sentinel for non-literal operands so the path stays probeable and parameterizable)
 - **pkg/ssrf**: Leaf package providing `ValidateURL` and `SafeDialContext` for SSRF protection (rejects private/loopback/link-local destinations and re-resolves at connect time to defeat DNS rebinding); imported by both `pkg/probe` and `pkg/crawl`
 - **pkg/analyze**: Static analysis of captured HTML response bodies; extracts `<form>` endpoints and parameter names as synthetic `ObservedRequest` entries (`Source="static:html"`) to surface form-based APIs not triggered during crawl
-- **pkg/classify**: Request classification engine with confidence-based heuristics; classifiers for REST, GraphQL, and WSDL; deduplication
-- **pkg/probe**: Active endpoint probing strategies (OPTIONS discovery, JSON schema inference, WSDL document fetching, GraphQL introspection with 3-tier WAF bypass); SSRF protection with DNS rebinding mitigation
+- **pkg/classify**: Request classification engine with confidence-based heuristics; classifiers for REST, GraphQL, WSDL, and gRPC; deduplication
+- **pkg/probe**: Active endpoint probing strategies (OPTIONS discovery, JSON schema inference, WSDL document fetching, GraphQL introspection with 3-tier WAF bypass, gRPC server reflection); SSRF protection with DNS rebinding mitigation (also applied to gRPC dial via a configurable `Config.Dialer`)
 - **pkg/generate**: Spec generation interface and registry; delegates to sub-packages by API type
 - **pkg/generate/rest**: OpenAPI 3.0 generation, path normalization (UUID detection, context-aware parameter naming), JSON schema inference, form-encoded and multipart request-body inference
 - **pkg/generate/graphql**: GraphQL SDL generation from introspection results or traffic-based inference
 - **pkg/generate/wsdl**: WSDL generation from SOAP traffic, WSDL document parsing, type inference from SOAP envelopes
+- **pkg/generate/grpc**: `.proto` (proto3) generation from gRPC reflection descriptors via `jhump/protoreflect`'s `protoprint`. Reconstructs the `FileDescriptorProto` graph captured by the probe and renders deterministic source (sorted files/elements, `google/protobuf/*` well-known files omitted). Requires reflection `FileDescriptors`; traffic-only inference is not yet implemented and returns an error.
 - **pkg/analyze/jsstatic**: Static analysis of captured JavaScript bundles using BishopFox/jsluice. Sits between the capture stage and classify/generate stages. Recovers API endpoints, HTTP methods, path parameters (via EXPR→{param} normalization), and request-body field names (from `fetch`/`axios` object literals). Synthesises `crawl.ObservedRequest` entries with `Source="static:js"` or `"static:js-sourcemap"` and appends them after dynamic entries so `classify.Deduplicate` keeps dynamic observations on ties. Enabled by default; opt out with `--analyze-js=false`.
 - **pkg/importer**: Traffic importers for Burp Suite XML, HAR 1.2, and mitmproxy dumps (including mitmproxy's native tnetstring `.mitm` format); format registry with layered safety caps — 500 MB per file, 64 MB per tnetstring element, 1 M entries per list/dict, 500 K flows per native stream
 - **pkg/mediatype**: Shared media-type canonicalization (lowercase + parameter strip). Used by classify and generate/rest where an import cycle prevents direct sharing.
 - **pkg/sdk**: Implements the capability-sdk `Capability[capmodel.WebApplication]` interface, exposing the vespasian pipeline to chariot/Guard hosts. The standalone CLI does not import this package.
+- **internal/grpcwire**: gRPC length-prefixed framing + protobuf wire-format parser (ParseFrame, ParseVarint, ParseTag, WalkFields). Not yet wired into the classifier, probe, or generator — it is foundation reserved for the future traffic-inference path that `pkg/generate/grpc` does not yet implement (the generator currently relies on reflection descriptors).
 
 ### Key Patterns
 
 - **Registry pattern**: Both `pkg/importer` and `pkg/generate` use a registry map to look up implementations by name (`Get()` function)
-- **Strategy pattern**: `pkg/probe` defines `ProbeStrategy` interface; each probe type (Options, Schema, WSDL, GraphQL) is a separate implementation
+- **Strategy pattern**: `pkg/probe` defines `ProbeStrategy` interface; each probe type (Options, Schema, WSDL, GraphQL, gRPC reflection) is a separate implementation
 - **Classifier interface**: `pkg/classify` defines `APIClassifier` interface; each API type has its own classifier with heuristic rules and confidence scores
 
 ### Capture Format
@@ -97,10 +101,10 @@ The `query_params` field is `map[string][]string` (multi-value). Capture files g
 
 | Command   | Purpose |
 |-----------|---------|
-| `scan`    | Full pipeline: crawl + classify + probe + generate. Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default true), `--merge-slugs` (default false), `--slug-threshold` (default 2) |
+| `scan`    | Full pipeline: crawl + classify + probe + generate. Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default true), `--merge-slugs` (default false), `--slug-threshold` (default 2), `--grpc-insecure-skip-verify` (default false; opt-in TLS trust-chain skip for gRPC reflection) |
 | `crawl`   | Capture traffic via headless browser → capture.json. Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default true) |
 | `import`  | Convert Burp XML / HAR / mitmproxy → capture.json |
-| `generate` | Produce spec from capture.json (REST→OpenAPI, GraphQL→SDL, WSDL→WSDL). Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default false), `--merge-slugs` (default false), `--slug-threshold` (default 2) |
+| `generate` | Produce spec from capture.json (REST→OpenAPI, GraphQL→SDL, WSDL→WSDL, gRPC→`.proto`). Flags: `--analyze-js` (default true), `--fetch-sourcemaps` (default false), `--merge-slugs` (default false), `--slug-threshold` (default 2), `--grpc-insecure-skip-verify` (default false). `grpc` must be passed explicitly; unlike the other types it is **not** fully offline — descriptors are not stored in the capture (`FileDescriptors` is `json:"-"`), so `generate grpc` re-runs the reflection probe live against the gRPC targets in the capture (needs `--probe`, on by default, and target reachability). |
 | `version` | Show version information |
 
 ## Test Infrastructure
@@ -110,6 +114,7 @@ The `test/` directory contains live test targets:
 - **test/rest-api/**: Go HTTP server exposing REST endpoints for end-to-end testing
 - **test/soap-service/**: Go HTTP server exposing SOAP/WSDL endpoints
 - **test/graphql-server/**: Node.js GraphQL server with Apollo
+- **test/grpc-server/**: Go gRPC server with Server Reflection enabled (sample User/Order/Account services, including a streaming method) for reflection-probe testing
 
 See `test/README.md` for how to run the suite, including the `TEST_HOST` override for devcontainer setups.
 

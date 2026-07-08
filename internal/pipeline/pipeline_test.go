@@ -17,12 +17,26 @@ package pipeline_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
 
 	"github.com/praetorian-inc/vespasian/internal/pipeline"
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
@@ -205,4 +219,124 @@ func TestClassifyProbeGenerate_MergeSlugsPassThrough(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(literal), "/api/posts/a", "MergeSlugs unset must keep the literal slug path")
 	assert.NotContains(t, string(literal), "{postSlug}", "MergeSlugs unset must not template the slug position")
+}
+
+// ---------------------------------------------------------------------------
+// TEST-002 (SEC-BE follow-up): GRPCInsecureSkipVerify threads through the
+// pipeline into probe.Config and the gRPC reflection probe. The probe's own
+// package tests (pkg/probe/grpc_test.go) prove the flag toggles TLS trust-chain
+// verification; this test proves the pipeline Options field actually reaches it.
+//
+// The TLS+reflection server below is reimplemented here because the probe test
+// helpers are unexported (package probe) and cannot be shared with this
+// external test package.
+// ---------------------------------------------------------------------------
+
+// grpcSelfSignedTLSConfig builds a *tls.Config carrying a freshly generated,
+// in-memory self-signed certificate valid for 127.0.0.1 (mirrors
+// pkg/probe/grpc_test.go: selfSignedTLSConfig).
+func grpcSelfSignedTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	cert := tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  key,
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}} //nolint:gosec // test server cert
+}
+
+// startTestGRPCReflectionServerTLS brings up an in-process gRPC server on
+// 127.0.0.1:0 served over TLS with a self-signed certificate, with the health
+// service and reflection registered (mirrors pkg/probe/grpc_test.go:
+// startTestGRPCServerTLS). Returns the listener address and a cleanup function.
+func startTestGRPCReflectionServerTLS(t *testing.T) (string, func()) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	s := grpc.NewServer(grpc.Creds(credentials.NewTLS(grpcSelfSignedTLSConfig(t))))
+	healthpb.RegisterHealthServer(s, health.NewServer())
+	reflection.Register(s)
+
+	go func() {
+		_ = s.Serve(lis)
+	}()
+
+	cleanup := func() {
+		s.GracefulStop()
+	}
+	return lis.Addr().String(), cleanup
+}
+
+// TestClassifyProbeGenerate_GRPCInsecureSkipVerify proves that
+// Options.GRPCInsecureSkipVerify is threaded from the pipeline Options through
+// probe.Config to the gRPC reflection probe, end-to-end.
+//
+// The gRPC classifier returns 0.99 confidence when a request carries an
+// application/grpc content-type AND a grpc-status trailer (the HTTP/2 gRPC
+// fingerprint per pkg/classify/grpc.go), so Classify(req) succeeds at the 0.5
+// threshold used here. The target is the in-process self-signed TLS reflection
+// server; AllowPrivate=true installs the pipeline's permissive dialer so the
+// loopback (private) address is not rejected by SSRF SafeDialContext.
+func TestClassifyProbeGenerate_GRPCInsecureSkipVerify(t *testing.T) {
+	addr, stop := startTestGRPCReflectionServerTLS(t)
+	t.Cleanup(stop)
+
+	req := crawl.ObservedRequest{
+		Method:  "POST",
+		URL:     "https://" + addr + "/grpc.health.v1.Health/Check",
+		Headers: map[string]string{"Content-Type": "application/grpc"},
+		Response: crawl.ObservedResponse{
+			StatusCode:  200,
+			ContentType: "application/grpc",
+			Headers:     map[string]string{"grpc-status": "0"},
+		},
+	}
+
+	t.Run("insecure_skip_verify_true", func(t *testing.T) {
+		spec, err := pipeline.ClassifyProbeGenerate(context.Background(), []crawl.ObservedRequest{req}, pipeline.Options{
+			APIType:                pipeline.APITypeGRPC,
+			Confidence:             0.5,
+			Probe:                  true,
+			AllowPrivate:           true,
+			GRPCInsecureSkipVerify: true,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, spec, "reflection over self-signed TLS with skip-verify must yield a .proto spec")
+		assert.Contains(t, string(spec), "service", "generated .proto must declare a gRPC service")
+	})
+
+	t.Run("verify_by_default", func(t *testing.T) {
+		// Self-signed cert fails verification → reflection never runs → no
+		// FileDescriptors → the gRPC generator returns its "requires server
+		// reflection" error. This is the negative half proving the flag actually
+		// changes behavior through the pipeline.
+		spec, err := pipeline.ClassifyProbeGenerate(context.Background(), []crawl.ObservedRequest{req}, pipeline.Options{
+			APIType:                pipeline.APITypeGRPC,
+			Confidence:             0.5,
+			Probe:                  true,
+			AllowPrivate:           true,
+			GRPCInsecureSkipVerify: false,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reflection",
+			"verify-by-default must fail because reflection never ran (no descriptors), not some unrelated error")
+		assert.Empty(t, spec)
+	})
 }

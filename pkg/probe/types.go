@@ -15,6 +15,8 @@
 package probe
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"time"
 
@@ -42,6 +44,30 @@ type Config struct {
 	// MaxEndpoints limits the number of unique URLs probed per strategy.
 	// If zero, defaults to DefaultMaxEndpoints.
 	MaxEndpoints int
+
+	// Dialer is used by probes that establish their own connections (e.g., the
+	// gRPC reflection probe, which cannot reuse the http.Client). If nil, the
+	// default SSRF-safe dialer is used. Tests targeting loopback should set a
+	// plain net.Dialer.
+	Dialer func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// GRPCInsecureSkipVerify disables TLS certificate verification when the
+	// gRPC reflection probe dials a TLS target. Default false (verify). Enable
+	// only to enumerate self-signed/internal-CA targets you trust; SSRF is
+	// still enforced by the Dialer regardless.
+	GRPCInsecureSkipVerify bool
+
+	// MaxReflectionDescriptors caps how many discovered services the reflection
+	// probe enumerates before stopping (the loop-level guard against a hostile
+	// server advertising unbounded services). Zero means use the package
+	// default (maxGRPCFileDescriptors). Overridable primarily for tests.
+	MaxReflectionDescriptors int
+
+	// MaxReflectionDescriptorBytes caps the aggregate retained descriptor bytes
+	// at which the reflection probe stops enumerating further services. Zero
+	// means use the package default (maxGRPCDescriptorBytes). Overridable
+	// primarily for tests.
+	MaxReflectionDescriptorBytes int
 }
 
 // DefaultMaxEndpoints is the default limit on unique URLs probed per strategy.
@@ -64,6 +90,15 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.MaxEndpoints == 0 {
 		cfg.MaxEndpoints = DefaultMaxEndpoints
+	}
+	if cfg.Dialer == nil {
+		cfg.Dialer = ssrf.SafeDialContext
+	}
+	if cfg.MaxReflectionDescriptors == 0 {
+		cfg.MaxReflectionDescriptors = maxGRPCFileDescriptors
+	}
+	if cfg.MaxReflectionDescriptorBytes == 0 {
+		cfg.MaxReflectionDescriptorBytes = maxGRPCDescriptorBytes
 	}
 	if cfg.Client == nil {
 		cfg.Client = &http.Client{

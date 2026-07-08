@@ -41,12 +41,13 @@ Vespasian takes a different approach: it observes actual network traffic at the 
 | **REST API Discovery** | Classifies REST endpoints via content-type, path patterns, and response structure; outputs OpenAPI 3.0 |
 | **GraphQL API Discovery** | Detects GraphQL endpoints, runs tiered introspection queries, and generates GraphQL SDL schemas |
 | **WSDL/SOAP Discovery** | Identifies SOAP services via SOAPAction headers and envelope detection; fetches and parses WSDL documents |
-| **API Type Auto-Detection** | Automatically determines API type (REST, GraphQL, WSDL) from captured traffic without manual selection |
+| **gRPC API Discovery** | Classifies gRPC and gRPC-Web traffic via content-type, trailer headers, and path shape; enumerates services and methods through the Server Reflection Protocol and generates `.proto` schemas |
+| **API Type Auto-Detection** | Automatically determines API type (REST, GraphQL, WSDL) from captured traffic without manual selection. gRPC is opt-in via `--api-type grpc` — its binary HTTP/2 framing is not auto-detected |
 | **Browser Crawling** | Two backends: headless mode drives Chrome via [go-rod](https://github.com/go-rod/rod) for full JavaScript/SPA support; non-headless mode uses a stdlib net/http engine (DFS, 150 rps, scope+SSRF redirect guard) for lightweight crawls |
 | **SPA Bundle Extraction** | Post-crawl pass that scans JavaScript bundles for API path strings and probes them with raw HTTP, recovering endpoints the headless browser could not exercise |
 | **Static Form Extraction** | Statically parses `<form>` elements in captured HTML responses — including login, search, and admin forms — to surface submission endpoints and parameters that dynamic crawling may never trigger |
 | **Traffic Import** | Import existing captures from Burp Suite XML, HAR 1.2 files, and mitmproxy dumps |
-| **Active Probing** | OPTIONS discovery, JSON schema inference, WSDL document fetching, and GraphQL introspection |
+| **Active Probing** | OPTIONS discovery, JSON schema inference, WSDL document fetching, GraphQL introspection, and gRPC server reflection |
 | **Path Normalization** | `/users/42` and `/users/87` become `/users/{id}` with known literal preservation (`/me`, `/self`) |
 | **SSRF Protection** | Blocks crawling and probing of private and loopback addresses by default. Pass `--dangerous-allow-private` to test internal targets (localhost, 127.0.0.1, RFC1918, link-local); the flag is required when the seed URL is itself a private host. |
 | **JS Bundle Static Analysis** | Statically analyses captured JavaScript bundles to recover API endpoints, path parameters, and request-body fields missed by dynamic crawling. Enabled by default via `--analyze-js`; sourcemap recovery is controlled by `--fetch-sourcemaps` (default: `true` for `scan`/`crawl`, `false` for `generate`). |
@@ -65,9 +66,9 @@ flowchart LR
     end
     subgraph Generate
         C --> S["Static Analyzer<br/>HTML form extraction"]
-        S --> D["Classifier<br/>REST, GraphQL, WSDL"]
-        D --> E["Prober<br/>OPTIONS, schema, WSDL, introspection"]
-        E --> F["Spec Generator<br/>OpenAPI 3.0, GraphQL SDL, WSDL"]
+        S --> D["Classifier<br/>REST, GraphQL, WSDL, gRPC"]
+        D --> E["Prober<br/>OPTIONS, schema, WSDL, introspection, gRPC reflection"]
+        E --> F["Spec Generator<br/>OpenAPI 3.0, GraphQL SDL, WSDL, .proto"]
     end
 ```
 
@@ -220,13 +221,14 @@ Generate an API specification with Vespasian, then pass it directly to [Hadrian]
 
 ## API Type Support
 
-Vespasian classifies and generates specifications for three API types:
+Vespasian classifies and generates specifications for four API types:
 
 | API Type | Classification Signals | Output Format | Probing |
 |----------|----------------------|---------------|---------|
 | **REST** | JSON/XML content-type, `/api/` `/v1/` path patterns, HTTP methods | OpenAPI 3.0 (YAML/JSON) | OPTIONS discovery, JSON, urlencoded, and multipart request-body inference |
 | **GraphQL** | `/graphql` path, query structure in POST body, `data`/`errors` response keys | GraphQL SDL | Tiered introspection queries (3 tiers for WAF bypass) |
 | **WSDL/SOAP** | SOAPAction header, SOAP envelope in body, `?wsdl` URL parameter | WSDL XML | Active `?wsdl` document fetching |
+| **gRPC** | `application/grpc`/`application/grpc-web*` content-type, `grpc-status`/`grpc-message` trailers, `/<pkg.Service>/<Method>` POST path | `.proto` (proto3) | Server Reflection Protocol enumeration (`--api-type grpc` only) |
 
 ### REST Classification Heuristics
 
@@ -252,6 +254,30 @@ Vespasian uses a tiered introspection strategy to handle WAF-protected GraphQL s
 - **Tier 3**: Minimal last-resort query with the smallest payload
 - **Fallback**: Traffic-based inference from observed queries and mutations when introspection is disabled
 
+### gRPC Classification Heuristics
+
+gRPC runs over HTTP/2 with binary framing, so it is **opt-in** rather than auto-detected — select it with `--api-type grpc`. The classifier scores observed traffic (e.g. proxy-flattened captures) on:
+
+1. **Content-type**: `application/grpc` or `application/grpc-web*` on the request or response (0.95 confidence)
+2. **Trailer headers**: `grpc-status` or `grpc-message` in the response (0.80 confidence)
+3. **Path shape**: a `POST` to a `/<pkg.qualified.Service>/<Method>` path (0.60 confidence)
+4. **Combined signals**: gRPC content-type **and** trailer together — the HTTP/2-plus-trailers fingerprint — boost confidence to 0.99
+
+### gRPC Server Reflection
+
+The probe enumerates a target's services, methods, and message types via the [gRPC Server Reflection Protocol](https://github.com/grpc/grpc/blob/master/doc/server-reflection.md), then renders the descriptor graph to proto3 source:
+
+- **Version negotiation**: tries reflection `v1`, falling back to `v1alpha` on `Unimplemented`.
+- **Schema closure**: walks the transitive `FileDescriptorProto` import graph (the well-known `google/protobuf/*` files are omitted from output since any consumer already has them).
+- **Reflection disabled**: when a server is reachable but reflection is off or gated, Vespasian reports a structured reason — `Unimplemented` (not registered), or `Unauthenticated`/`PermissionDenied` (auth-gated) — instead of failing silently.
+- **Auth-gated reflection**: the probe does not yet send call credentials/metadata, so servers requiring auth for reflection are *detected and reported* as `Unauthenticated`/`PermissionDenied`, not bypassed.
+- **Generator requirement**: `.proto` generation requires reflection descriptors; traffic-only inference is not yet supported, so a reflection-disabled target yields no spec.
+- **Partial descriptors**: if the reflection result is missing a transitive import (e.g. a very large import graph truncated at the fetch cap), the generator emits every `.proto` it can still link and lists the omitted files in a `// WARNING:` header, rather than failing the whole generation.
+- **SSRF protection**: the dial target is validated before connecting and re-checked at connect time (closing the DNS-rebinding TOCTOU window), the same as the HTTP probe path.
+- **TLS targets**: certificates are verified by default. Internal gRPC services often present self-signed or internal-CA certs; to enumerate those, pass `--grpc-insecure-skip-verify` to skip verification (SSRF is still enforced by the dialer regardless). Without the flag, a target whose cert fails verification is not enumerated.
+
+For a deeper reference on gRPC support — classification signals, reflection probe behavior, `.proto` generation, TLS, and end-to-end examples — see [docs/grpc.md](docs/grpc.md). A step-by-step tutorial lives on the [gRPC API Discovery](https://github.com/praetorian-inc/vespasian/wiki/gRPC-API-Discovery) wiki page.
+
 ## CLI Reference
 
 ### `vespasian scan`
@@ -260,7 +286,8 @@ Convenience command that crawls a target and generates a specification in one st
 
 ```
 vespasian scan <url> [flags]
-  --api-type         API type: auto, rest, graphql, wsdl (default: auto)
+  --api-type         API type: auto, rest, graphql, wsdl, grpc (default: auto;
+                     grpc must be selected explicitly — it is not auto-detected)
   -H, --header       Auth headers to inject (repeatable)
   -o, --output       Output spec file (default: stdout)
   --depth            Max crawl depth (default: 3)
@@ -323,7 +350,9 @@ Produces an API specification from a capture file.
 
 ```
 vespasian generate <api-type> <capture-file> [flags]
-  API types: rest, graphql, wsdl
+  API types: rest, graphql, wsdl, grpc
+             (grpc emits .proto and requires reflection descriptors in the
+             capture; traffic-only inference is unsupported)
   -o, --output       Output file (default: stdout)
   --confidence       Min classification confidence (default: 0.5)
   --probe            Enable active probing (default: true)
@@ -343,9 +372,9 @@ vespasian generate <api-type> <capture-file> [flags]
 |-----------|---------|-----------------|
 | **Crawler** | Two backends: go-rod headless Chrome (JavaScript/SPA support) and stdlib net/http (lightweight, DFS, 150 rps, SSRF guard) | Protocol-agnostic |
 | **Importers** | Convert Burp Suite XML, HAR, and mitmproxy traffic to capture format | All three formats |
-| **Classifier** | Separates API calls from static assets using heuristics | REST, GraphQL, WSDL |
-| **Prober** | Enriches endpoints via active requests | OPTIONS, JSON schema, WSDL fetch, GraphQL introspection |
-| **Generator** | Produces specification files from classified and probed traffic | OpenAPI 3.0, GraphQL SDL, WSDL |
+| **Classifier** | Separates API calls from static assets using heuristics | REST, GraphQL, WSDL, gRPC |
+| **Prober** | Enriches endpoints via active requests | OPTIONS, JSON schema, WSDL fetch, GraphQL introspection, gRPC reflection |
+| **Generator** | Produces specification files from classified and probed traffic | OpenAPI 3.0, GraphQL SDL, WSDL, `.proto` |
 
 ### Package Layout
 
@@ -356,12 +385,14 @@ pkg/sdk/                capability-sdk Capability adapter (used by Guard hosts)
 pkg/crawl/              Crawler (headless go-rod + net/http backends) + capture format
 pkg/importer/           Traffic importers (Burp, HAR, mitmproxy)
 pkg/analyze/            Static HTML form extraction from captured response bodies
-pkg/classify/           API classification (REST, GraphQL, WSDL)
-pkg/probe/              Endpoint probing (OPTIONS, schema, WSDL, GraphQL introspection)
+pkg/classify/           API classification (REST, GraphQL, WSDL, gRPC)
+pkg/probe/              Endpoint probing (OPTIONS, schema, WSDL, GraphQL introspection, gRPC reflection)
 pkg/generate/
   ├── rest/             OpenAPI 3.0 generation, path normalization, schema inference
   ├── graphql/          GraphQL SDL generation, introspection, traffic inference
-  └── wsdl/             WSDL generation, SOAP operation extraction
+  ├── wsdl/             WSDL generation, SOAP operation extraction
+  └── grpc/             .proto generation from gRPC reflection descriptors
+internal/grpcwire/      gRPC length-prefix framing + protobuf wire-format parser
 ```
 
 For a deeper reference on the crawler — interface, backends, options, SSRF model, and how to add a new backend — see [docs/crawler.md](docs/crawler.md).
@@ -370,7 +401,11 @@ For a deeper reference on the crawler — interface, backends, options, SSRF mod
 
 ### What types of APIs can Vespasian discover?
 
-Vespasian discovers **REST APIs** (generating OpenAPI 3.0 specs), **GraphQL APIs** (generating SDL schemas via introspection or traffic inference), and **SOAP/WSDL services** (generating WSDL documents). It automatically detects the API type from captured traffic, or you can specify it explicitly with `--api-type`.
+Vespasian discovers **REST APIs** (generating OpenAPI 3.0 specs), **GraphQL APIs** (generating SDL schemas via introspection or traffic inference), **SOAP/WSDL services** (generating WSDL documents), and **gRPC services** (generating `.proto` schemas via server reflection). It automatically detects REST, GraphQL, and WSDL from captured traffic; gRPC must be selected explicitly with `--api-type grpc` because its binary HTTP/2 framing is not auto-detected.
+
+### How does Vespasian discover gRPC services?
+
+gRPC services are enumerated through the [Server Reflection Protocol](https://github.com/grpc/grpc/blob/master/doc/server-reflection.md): Vespasian asks the server to describe its own services, methods, and message types, then reconstructs a proto3 `.proto` from the returned descriptors. Run it via `--api-type grpc` in the `scan`/`generate` pipeline. If a server has reflection **disabled or auth-gated**, Vespasian reports the gRPC status reason (`Unimplemented`, `Unauthenticated`, `PermissionDenied`) rather than failing silently — but cannot reconstruct the schema, since `.proto` generation currently requires reflection descriptors.
 
 ### How is Vespasian different from running a web crawler?
 
