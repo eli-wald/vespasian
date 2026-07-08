@@ -37,7 +37,7 @@ import (
 // maxGRPCFileDescriptors caps the number of FileDescriptorProtos fetched per
 // target. Defensive guard against pathological servers with cyclic or deeply
 // nested import graphs.
-const maxGRPCFileDescriptors = 1000
+const maxGRPCFileDescriptors = classify.MaxGRPCFileDescriptors
 
 // maxReflectionRecvBytes caps a single reflection response message. Set
 // explicitly (rather than relying on gRPC's 4 MiB default) so per-message
@@ -47,7 +47,7 @@ const maxReflectionRecvBytes = 4 << 20 // 4 MiB
 // maxGRPCDescriptorBytes caps the aggregate serialized descriptor bytes
 // retained per target, bounding total memory even when many files stay
 // under the file-count cap. Guards against reflection memory-amplification.
-const maxGRPCDescriptorBytes = 64 << 20 // 64 MiB
+const maxGRPCDescriptorBytes = classify.MaxGRPCDescriptorBytes
 
 // reflectionServices are the gRPC reflection service names themselves; filtered
 // out of the discovered service list since they describe the reflection API,

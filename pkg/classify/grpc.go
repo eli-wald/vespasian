@@ -31,6 +31,16 @@ const (
 	GRPCContentTypeTrailerConfidence = 0.99 // gRPC content-type AND trailer (HTTP/2-style)
 )
 
+// Reflection descriptor caps shared by the probe (live reflection walk)
+// and generator (offline capture) paths so both bound descriptor memory
+// identically. Enforcement lives in pkg/probe (walkFileDescriptors) and
+// pkg/generate/grpc (Generate); this is the single source of truth for the
+// values so retuning one place updates both.
+const (
+	MaxGRPCFileDescriptors = 1000
+	MaxGRPCDescriptorBytes = 64 << 20 // 64 MiB
+)
+
 // grpcPathRE matches the gRPC convention /<pkg.qualified.Service>/<MethodName>.
 // Anchored: a single slash-separated pair only. The package part starts with a
 // letter and may contain dots; the method part starts with an uppercase letter
@@ -103,6 +113,13 @@ func (c *GRPCClassifier) ClassifyDetail(req crawl.ObservedRequest) (bool, float6
 	case hasTrailer:
 		confidence = GRPCTrailerConfidence
 	case hasPath:
+		confidence = GRPCPathConfidence
+	default:
+		// Unreachable today: the len(signals)==0 guard above guarantees at
+		// least one of hasContentType/hasTrailer/hasPath is set. Kept as a
+		// safety floor so a future signal added without its own case can't
+		// silently return (true, 0.0) — it defaults to the lowest positive
+		// confidence instead of a filtered-out zero.
 		confidence = GRPCPathConfidence
 	}
 
