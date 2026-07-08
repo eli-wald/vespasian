@@ -405,6 +405,56 @@ func TestGRPCProbe_Probe_NilSchemaOnUnreachableTarget(t *testing.T) {
 	assert.Nil(t, result[0].GRPCSchema, "a reachable-but-non-gRPC / unreachable target must yield a nil schema and no error")
 }
 
+// TestGRPCProbe_Probe_ReflectionBudgetStopsEnumeration pins the SEC-BE-002
+// loop-break guard in runReflection: once the (injectable) descriptor budget is
+// spent, the probe stops enumerating further services instead of issuing a
+// FileContainingSymbol RPC per advertised service. Two non-reflection services
+// are registered (Health + lab.v1.UserService) and MaxReflectionDescriptors is
+// set to 1, so exactly one service is enumerated before the break fires —
+// proving the loop terminates early rather than walking every advertised service.
+func TestGRPCProbe_Probe_ReflectionBudgetStopsEnumeration(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	s := grpc.NewServer()
+	healthpb.RegisterHealthServer(s, health.NewServer())
+	labpb.RegisterUserServiceServer(s, labpb.UnimplementedUserServiceServer{})
+	reflection.Register(s)
+	go func() {
+		_ = s.Serve(lis)
+	}()
+	defer s.Stop()
+
+	cfg := Config{
+		Timeout:                  5 * time.Second,
+		URLValidator:             func(string) error { return nil },
+		Dialer:                   loopbackDialer,
+		MaxReflectionDescriptors: 1, // trip the budget break after the first service
+	}
+	probe := NewGRPCProbe(cfg)
+
+	endpoints := []classify.ClassifiedRequest{
+		{APIType: "grpc"},
+	}
+	endpoints[0].URL = "http://" + lis.Addr().String() + "/grpc.health.v1.Health/Check"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := probe.Probe(ctx, endpoints)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+
+	schema := result[0].GRPCSchema
+	require.NotNil(t, schema, "GRPCSchema should be populated")
+	require.True(t, schema.ReflectionEnabled, "reflection must be enabled")
+
+	// Two non-reflection services are registered, but the descriptor budget cap
+	// of 1 stops enumeration after the first service is processed (the loop-top
+	// break trips on the second iteration), so exactly one service is extracted.
+	assert.Equal(t, 1, len(schema.Services), "budget break must stop enumeration after the cap is hit")
+}
+
 // TestGRPCProbe_Probe_DedupsByTarget verifies that multiple endpoints sharing
 // the same host:port produce a single reflection call and that all matching
 // endpoints receive the SAME *classify.GRPCReflectionResult pointer (pointer

@@ -56,6 +56,18 @@ type Config struct {
 	// only to enumerate self-signed/internal-CA targets you trust; SSRF is
 	// still enforced by the Dialer regardless.
 	GRPCInsecureSkipVerify bool
+
+	// MaxReflectionDescriptors caps how many discovered services the reflection
+	// probe enumerates before stopping (the loop-level guard against a hostile
+	// server advertising unbounded services). Zero means use the package
+	// default (maxGRPCFileDescriptors). Overridable primarily for tests.
+	MaxReflectionDescriptors int
+
+	// MaxReflectionDescriptorBytes caps the aggregate retained descriptor bytes
+	// at which the reflection probe stops enumerating further services. Zero
+	// means use the package default (maxGRPCDescriptorBytes). Overridable
+	// primarily for tests.
+	MaxReflectionDescriptorBytes int
 }
 
 // DefaultMaxEndpoints is the default limit on unique URLs probed per strategy.
@@ -81,6 +93,12 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.Dialer == nil {
 		cfg.Dialer = ssrf.SafeDialContext
+	}
+	if cfg.MaxReflectionDescriptors == 0 {
+		cfg.MaxReflectionDescriptors = maxGRPCFileDescriptors
+	}
+	if cfg.MaxReflectionDescriptorBytes == 0 {
+		cfg.MaxReflectionDescriptorBytes = maxGRPCDescriptorBytes
 	}
 	if cfg.Client == nil {
 		cfg.Client = &http.Client{

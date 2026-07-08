@@ -216,7 +216,7 @@ func (p *GRPCProbe) probeTarget(ctx context.Context, t grpcTargetInfo) *classify
 	client := grpcreflect.NewClientAuto(reqCtx, conn)
 	defer client.Reset()
 
-	return runReflection(ctx, client, t)
+	return p.runReflection(ctx, client, t)
 }
 
 // dialGRPC builds transport credentials (TLS honoring the configured
@@ -251,7 +251,7 @@ func (p *GRPCProbe) dialGRPC(t grpcTargetInfo) (*grpc.ClientConn, error) {
 // descriptors. It preserves probeTarget's three-outcome contract: nil (no gRPC
 // signal), ReflectionEnabled=false with a reason (structured unavailable), or
 // ReflectionEnabled=true with the discovered services and descriptors.
-func runReflection(ctx context.Context, client *grpcreflect.Client, t grpcTargetInfo) *classify.GRPCReflectionResult {
+func (p *GRPCProbe) runReflection(ctx context.Context, client *grpcreflect.Client, t grpcTargetInfo) *classify.GRPCReflectionResult {
 	services, err := client.ListServices()
 	if err != nil {
 		slog.DebugContext(ctx, "grpc probe: list services failed", "target", t.hostPort, "error", err)
@@ -273,6 +273,8 @@ func runReflection(ctx context.Context, client *grpcreflect.Client, t grpcTarget
 	}
 	fetched := map[string]bool{}
 	totalBytes := 0
+	maxFiles := p.config.MaxReflectionDescriptors
+	maxBytes := p.config.MaxReflectionDescriptorBytes
 
 	for _, svcName := range services {
 		if reflectionServices[svcName] {
@@ -281,10 +283,15 @@ func runReflection(ctx context.Context, client *grpcreflect.Client, t grpcTarget
 		// ListServices() output is attacker-controlled: a hostile reflection
 		// server can advertise an unbounded number of distinct services. Once
 		// the retained-descriptor budget is spent, stop issuing further
-		// FileContainingSymbol RPCs (each of which resolves and holds a file
-		// plus its transitive dependency closure), so peak memory stays bounded
-		// by the count/byte caps rather than by the advertised service count.
-		if len(fetched) >= maxGRPCFileDescriptors || totalBytes >= maxGRPCDescriptorBytes {
+		// FileContainingSymbol RPCs so the many-services amplification vector is
+		// bounded by the count/byte caps. This bounds the number of services
+		// enumerated and the descriptor bytes RETAINED — it does NOT bound the
+		// transient peak of a single FileContainingSymbol call: grpcreflect
+		// eagerly resolves a symbol's full transitive file closure (recursive
+		// fetches) before walkFileDescriptors applies any cap, so one
+		// pathological deep/wide closure is bounded only by MaxCallRecvMsgSize
+		// (4 MiB per message) times what completes within the reflection timeout.
+		if len(fetched) >= maxFiles || totalBytes >= maxBytes {
 			slog.DebugContext(ctx, "grpc probe: descriptor budget exhausted; stopping service enumeration",
 				"target", t.hostPort, "services_discovered", len(result.Services))
 			break

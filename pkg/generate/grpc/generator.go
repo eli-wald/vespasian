@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/jhump/protoreflect/desc"            //nolint:staticcheck // SA1019: protoprint requires v1 desc; no v2 equivalent exists
 	"github.com/jhump/protoreflect/desc/protoprint" //nolint:staticcheck // SA1019: protoprint requires v1 desc; no v2 equivalent exists
@@ -221,13 +222,16 @@ func buildDescriptorGraph(fdProtos []*descriptorpb.FileDescriptorProto) (map[str
 	return resolved, skipped, nil
 }
 
-// sanitizeComment strips CR/LF and other control characters from a
-// reflection-derived string before it is embedded in a // comment, so a
-// hostile descriptor filename cannot inject additional lines into the emitted
-// .proto artifact (which is later fed to protoc).
+// sanitizeComment strips characters that could break out of, or visually
+// reorder, the single-line // comment a reflection-derived filename is embedded
+// in. It removes C0/C1 control chars (incl. CR/LF) and DEL, the Unicode
+// line/paragraph separators U+2028/U+2029, and Unicode format/bidi controls
+// (category Cf, e.g. U+202E) — so a hostile descriptor filename cannot inject
+// or reorder lines in the emitted .proto for any downstream consumer, not just
+// protoc (which only treats '\n' as a // terminator).
 func sanitizeComment(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r == 0x7f || r < 0x20 {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r

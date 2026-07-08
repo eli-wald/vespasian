@@ -484,12 +484,23 @@ func TestGenerator_Generate_MalformedDescriptorErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "unmarshal file descriptor")
 }
 
-// TestSanitizeComment verifies control characters (notably CR/LF) are stripped
-// so a hostile descriptor filename cannot inject extra lines into a // comment.
+// TestSanitizeComment verifies control chars (notably CR/LF), Unicode line/
+// paragraph separators (U+2028/U+2029), C1 controls (U+0085 NEL), and format/
+// bidi controls (U+202E, category Cf) are stripped so a hostile descriptor
+// filename cannot inject or reorder lines in a // comment — while ordinary
+// characters, including ASCII space, pass through unchanged.
 func TestSanitizeComment(t *testing.T) {
 	assert.Equal(t, "evil.protoINJECTED", sanitizeComment("evil.proto\nINJECTED"))
 	assert.Equal(t, "abc", sanitizeComment("a\r\nb\tc"))
 	assert.Equal(t, "clean.proto", sanitizeComment("clean.proto"))
+	// Unicode separators / format controls, built from code points to keep the
+	// source pure ASCII.
+	assert.Equal(t, "ab", sanitizeComment("a"+string(rune(0x2028))+"b"), "U+2028 line separator must be stripped")
+	assert.Equal(t, "ab", sanitizeComment("a"+string(rune(0x2029))+"b"), "U+2029 paragraph separator must be stripped")
+	assert.Equal(t, "ab", sanitizeComment("a"+string(rune(0x0085))+"b"), "U+0085 NEL must be stripped")
+	assert.Equal(t, "ab", sanitizeComment("a"+string(rune(0x202E))+"b"), "U+202E bidi override (Cf) must be stripped")
+	// Ordinary ASCII space and printable chars are preserved.
+	assert.Equal(t, "a b.proto", sanitizeComment("a b.proto"))
 }
 
 // TestGenerator_Generate_IdenticalDescriptorsDedup verifies that two endpoints
