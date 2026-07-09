@@ -185,8 +185,12 @@ func (p *GRPCGatewayProbe) fetch(ctx context.Context, targetURL string) []byte {
 		return nil
 	}
 	defer func() {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)) //nolint:errcheck,gosec // best-effort drain
-		resp.Body.Close()                                    //nolint:errcheck,gosec // best-effort close
+		if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)); err != nil {
+			slog.DebugContext(ctx, "grpc-gateway probe: body drain failed", "url", targetURL, "error", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			slog.DebugContext(ctx, "grpc-gateway probe: body close failed", "url", targetURL, "error", err)
+		}
 	}()
 
 	if resp.StatusCode >= 400 {
