@@ -33,9 +33,11 @@
 //     from a grpc-gateway/Envoy OpenAPI (swagger) document served alongside the
 //     HTTP/JSON transcoding gateway. Scrapes a bounded set of well-known
 //     document paths over HTTP, recognizes grpc-gateway documents by their
-//     operationId/tags shape, and synthesizes descriptors via
-//     generate/grpc.FileDescriptorsFromServices. Defers to a reflection result
-//     when one is already present (reflection has real message fields).
+//     operationId/tags shape, and records the recovered service names on the
+//     endpoint's GRPCSchema. It does not synthesize descriptors itself —
+//     descriptor generation from those names is deferred to pkg/generate/grpc.
+//     Defers to a reflection result when one is already present (reflection has
+//     real message fields).
 //
 // SSRF protection is built in: [ValidateProbeURL] blocks requests to private
 // and loopback addresses (RFC 1918, RFC 4193, link-local) with DNS rebinding

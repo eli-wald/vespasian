@@ -34,10 +34,11 @@ func TestStrategiesForType(t *testing.T) {
 	cfg := probe.DefaultConfig()
 
 	tests := []struct {
-		name       string
-		apiType    string
-		wantLen    int
-		checkFirst func(t *testing.T, s probe.ProbeStrategy)
+		name        string
+		apiType     string
+		wantLen     int
+		checkFirst  func(t *testing.T, s probe.ProbeStrategy)
+		checkSecond func(t *testing.T, s probe.ProbeStrategy)
 	}{
 		{
 			name:    "WSDL returns one WSDLProbe",
@@ -68,6 +69,11 @@ func TestStrategiesForType(t *testing.T) {
 				_, ok := s.(*probe.GRPCProbe)
 				assert.True(t, ok, "expected first strategy to be *probe.GRPCProbe (reflection, richest), got %T", s)
 			},
+			checkSecond: func(t *testing.T, s probe.ProbeStrategy) {
+				t.Helper()
+				_, ok := s.(*probe.GRPCGatewayProbe)
+				assert.True(t, ok, "expected second strategy to be *probe.GRPCGatewayProbe, got %T", s)
+			},
 		},
 		{
 			name:    "REST returns OptionsProbe + SchemaProbe",
@@ -96,6 +102,9 @@ func TestStrategiesForType(t *testing.T) {
 			strategies := pipeline.StrategiesForType(tt.apiType, cfg)
 			require.Len(t, strategies, tt.wantLen)
 			tt.checkFirst(t, strategies[0])
+			if tt.checkSecond != nil {
+				tt.checkSecond(t, strategies[1])
+			}
 		})
 	}
 }

@@ -20,6 +20,7 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -72,8 +73,8 @@ func grpcWebJSRequest(t *testing.T) crawl.ObservedRequest {
 	}
 }
 
-// grpcServiceNames extracts the sorted service names carried by a
-// GRPCReflectionResult, or nil when schema is nil.
+// grpcServiceNames extracts the service names carried by a
+// GRPCReflectionResult, in schema.Services order, or nil when schema is nil.
 func grpcServiceNames(schema *classify.GRPCReflectionResult) []string {
 	if schema == nil {
 		return nil
@@ -212,6 +213,42 @@ func TestEnrichGRPCFromBindings_FilterDropsRecoveredFQNLeavesBareEndpointUnfille
 	}
 	if result[1].GRPCSchema != nil {
 		t.Errorf("enrichGRPCFromBindings: bare endpoint schema = %+v, want nil (filterUncoveredServices must remove the only recovered FQN before the fill loop runs)", result[1].GRPCSchema)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LAB-3864 regression — enrichGRPCFromBindings must run even with Probe=false
+// ---------------------------------------------------------------------------
+
+// TestClassifyProbeGenerate_GRPCBindingsEnrichmentRunsWithoutProbe pins the
+// fix that moved the enrichGRPCFromBindings call in ClassifyProbeGenerate
+// outside the `if opts.Probe` block (still gated on
+// opts.APIType == APITypeGRPC): gRPC-Web JS binding recovery must run whether
+// or not active probing is enabled. The GET request carrying the
+// users_connect.js bundle scores 0 on classify.GRPCClassifier (no gRPC
+// content-type, trailer, or POST+path-shape signal), so with Probe: false the
+// classified set reaching enrichGRPCFromBindings is empty — the only way
+// users.v1.UserService reaches the generated .proto is via the bindings
+// recovery path. If enrichGRPCFromBindings is moved back inside the
+// `if opts.Probe` block, classified stays empty and
+// generate/grpc.Generator.Generate returns "no endpoints provided",
+// failing this test.
+func TestClassifyProbeGenerate_GRPCBindingsEnrichmentRunsWithoutProbe(t *testing.T) {
+	requests := []crawl.ObservedRequest{grpcWebJSRequest(t)}
+
+	spec, err := ClassifyProbeGenerate(context.Background(), requests, Options{
+		APIType:    APITypeGRPC,
+		Confidence: 0.5,
+		Probe:      false,
+	})
+	if err != nil {
+		t.Fatalf("ClassifyProbeGenerate(Probe=false) returned an error: %v", err)
+	}
+	if len(spec) == 0 {
+		t.Fatal("ClassifyProbeGenerate(Probe=false) returned an empty .proto")
+	}
+	if !strings.Contains(string(spec), "UserService") {
+		t.Errorf("expected generated .proto to contain UserService (recovered via gRPC-Web bindings despite Probe=false), got:\n%s", spec)
 	}
 }
 

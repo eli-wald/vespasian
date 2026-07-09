@@ -122,12 +122,32 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 				return d.DialContext(ctx, network, addr)
 			}
 		}
+		// Pure grpc-gateway traffic is REST/JSON, so the gRPC classifier never
+		// marks it APIType=="grpc" and the gRPC/gateway probes (which only
+		// iterate grpc endpoints) get no targets. Seed one synthetic grpc
+		// endpoint per distinct host so reflection and the gateway probe have
+		// something to reach. SSRF protection still applies via the probes'
+		// URLValidator/Dialer.
+		if opts.APIType == APITypeGRPC {
+			classified = seedGRPCHostEndpoints(requests, classified, probe.DefaultMaxEndpoints)
+		}
 		strategies := StrategiesForType(opts.APIType, cfg)
 		enriched, probeErrs := probe.RunStrategies(ctx, strategies, classified)
 		for _, e := range probeErrs {
 			writeStatus(opts.Status, "probe warning: %v\n", e)
 		}
 		classified = enriched
+	}
+
+	// Lowest-priority gRPC-Web JS binding recovery from the capture. This is a
+	// static pass over the captured JS bodies (no network), so it runs for
+	// --api-type grpc whether or not probing was enabled. When probing ran,
+	// classified holds the probed result and bindings fill only the endpoints
+	// reflection/gateway did not cover; reflection results are never
+	// overwritten (reflection > gateway > bindings). When probing did not run,
+	// classified holds the raw classified set and bindings enrich that.
+	if opts.APIType == APITypeGRPC {
+		classified = enrichGRPCFromBindings(requests, classified, opts.Status)
 	}
 
 	gen, err := generate.GetWithOptions(opts.APIType, generate.Options{
