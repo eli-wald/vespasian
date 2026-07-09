@@ -19,7 +19,7 @@ jobs:
   # Gate: skip PR runs unless the 'live-tests' label is present.
   # Push-to-main and workflow_dispatch always run.
   check-label:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       should-run: ${{ steps.gate.outputs.run }}
@@ -40,7 +40,7 @@ jobs:
   offline-tests:
     needs: check-label
     if: needs.check-label.outputs.should-run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -82,7 +82,7 @@ jobs:
   live-tests:
     needs: check-label
     if: needs.check-label.outputs.should-run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       VESPASIAN_NO_SANDBOX: "true"

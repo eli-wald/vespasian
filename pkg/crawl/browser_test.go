@@ -88,14 +88,17 @@ func TestConfigureLauncher(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !l.Has("proxy-server") {
-				t.Error("expected proxy-server flag to be set")
+			if got := l.Get("proxy-server"); got != "http://127.0.0.1:8080" {
+				t.Errorf("Get(proxy-server) = %q, want http://127.0.0.1:8080", got)
 			}
 		})
 		t.Run("invalid proxy returns error", func(t *testing.T) {
 			_, err := configureLauncher(BrowserOptions{Proxy: "not a valid proxy"})
 			if err == nil {
 				t.Fatal("expected error for invalid proxy, got nil")
+			}
+			if !strings.Contains(err.Error(), "proxy") {
+				t.Errorf("error %q should mention proxy", err.Error())
 			}
 		})
 	})
@@ -105,8 +108,21 @@ func TestConfigureLauncher(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !l.Has("rod-bin") {
-			t.Error("expected rod-bin flag to be set after ChromePath")
+		if got := l.Get("rod-bin"); got != "/usr/bin/chromium" {
+			t.Errorf("Get(rod-bin) = %q, want /usr/bin/chromium", got)
 		}
 	})
+}
+
+func TestNewBrowserManager_InvalidProxyReturnsError(t *testing.T) {
+	mgr, err := NewBrowserManager(BrowserOptions{Proxy: "not a valid proxy"})
+	if err == nil {
+		t.Fatal("expected error for invalid proxy, got nil")
+	}
+	if mgr != nil {
+		t.Error("expected nil manager on error")
+	}
+	if !strings.Contains(err.Error(), "proxy") {
+		t.Errorf("error %q should mention proxy", err.Error())
+	}
 }
