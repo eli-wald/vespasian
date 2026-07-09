@@ -447,6 +447,117 @@ func TestEnrichGRPCFromBindings_SingleHostGatewayCoveredPlusStreamingOnlyBinding
 }
 
 // ---------------------------------------------------------------------------
+// TEST-001 — nameOnlyCoveredServices: bindings-only method carried through on
+// a name-only-covered (grpc-gateway) service
+// ---------------------------------------------------------------------------
+
+// TestEnrichGRPCFromBindings_NameOnlyCoveredServiceCarriesBindingsOnlyMethod
+// pins nameOnlyCoveredServices (TEST-001): a service that grpc-gateway
+// NAME-ONLY covers (ReflectionEnabled=false, no FileDescriptors, one unary
+// method recovered from an OpenAPI document) must still surface its
+// bindings-only methods — RPCs the OpenAPI/JSON-transcoding gateway cannot
+// expose (client-streaming/bidi) — on a trailing endpoint, so the generator's
+// per-method union can add them to the service.
+//
+// The recovered gRPC-Web bundle carries the SAME service FQN
+// (greet.v1.Greeter) with an extra ClientStreaming method (Chat) the gateway
+// lacks. Because Greeter's FQN is already covered, filterUncoveredServices
+// drops it entirely (uncovered == nil): the ONLY path that can carry Chat
+// through is nameOnlyCoveredServices. If nameOnlyCoveredServices returned nil
+// (e.g. `return nil`), both uncovered and nameOnlyExtra would be empty,
+// enrichGRPCFromBindings would return the input unchanged, and Chat would be
+// silently dropped — this test's foundChat assertion fails against that
+// mutation while every pre-existing test in this file stays green (per the
+// TEST-001 review finding).
+func TestEnrichGRPCFromBindings_NameOnlyCoveredServiceCarriesBindingsOnlyMethod(t *testing.T) {
+	// Real Connect-ES-shaped gRPC-Web bundle: greet.v1.Greeter with its known
+	// unary method (SayHello, mirroring the gateway's coverage) plus a
+	// client-streaming method (Chat) the OpenAPI/JSON-transcoding gateway
+	// cannot expose at all.
+	bindingsJS := []byte(`
+		export const Greeter = {
+		  typeName: "greet.v1.Greeter",
+		  methods: {
+		    sayHello: {
+		      name: "SayHello",
+		      I: HelloRequest,
+		      O: HelloResponse,
+		      kind: MethodKind.Unary,
+		    },
+		    chat: {
+		      name: "Chat",
+		      I: ChatRequest,
+		      O: ChatResponse,
+		      kind: MethodKind.ClientStreaming,
+		    },
+		  },
+		};
+	`)
+	requests := []crawl.ObservedRequest{
+		{
+			Method: "GET",
+			URL:    "https://example.com/greet_connect.js",
+			Response: crawl.ObservedResponse{
+				ContentType: "application/javascript",
+				Body:        bindingsJS,
+			},
+		},
+	}
+
+	// The single grpc endpoint, name-only covered by the grpc-gateway probe
+	// (ReflectionEnabled=false, no FileDescriptors, hasCoverage==true) —
+	// carrying only SayHello, exactly as GRPCGatewayProbe would leave it after
+	// recovering an OpenAPI document that transcodes just the unary method.
+	gatewaySchema := &classify.GRPCReflectionResult{
+		ReflectionEnabled: false,
+		Services: []classify.GRPCService{
+			{Name: "greet.v1.Greeter", Methods: []classify.GRPCMethod{
+				{Name: "SayHello", InputType: "HelloRequest", OutputType: "HelloResponse"},
+			}},
+		},
+	}
+	enriched := []classify.ClassifiedRequest{grpcClassifiedRequest(gatewaySchema)}
+
+	result := enrichGRPCFromBindings(requests, enriched, io.Discard)
+
+	// The gateway endpoint must be unchanged: same schema pointer, still just
+	// SayHello, coverage preserved.
+	if result[0].GRPCSchema != gatewaySchema {
+		t.Fatal("enrichGRPCFromBindings: gateway-covered endpoint's GRPCSchema pointer must be left untouched")
+	}
+	if names := grpcServiceNames(result[0].GRPCSchema); len(names) != 1 || names[0] != "greet.v1.Greeter" {
+		t.Fatalf("enrichGRPCFromBindings: gateway-covered endpoint services = %v, want [greet.v1.Greeter]", names)
+	}
+	if methods := result[0].GRPCSchema.Services[0].Methods; len(methods) != 1 || methods[0].Name != "SayHello" {
+		t.Fatalf("enrichGRPCFromBindings: gateway-covered endpoint methods = %v, want [SayHello]", methods)
+	}
+
+	// Load-bearing assertion: some endpoint in the result must carry
+	// greet.v1.Greeter WITH the bindings-only Chat method. Fails when
+	// nameOnlyCoveredServices is stubbed to return nil (TEST-001 mutation).
+	var foundChat bool
+	for _, ep := range result {
+		s := ep.GRPCSchema
+		if s == nil {
+			continue
+		}
+		for _, svc := range s.Services {
+			if svc.Name != "greet.v1.Greeter" {
+				continue
+			}
+			for _, m := range svc.Methods {
+				if m.Name == "Chat" {
+					foundChat = true
+				}
+			}
+		}
+	}
+	if !foundChat {
+		t.Fatal("enrichGRPCFromBindings: greet.v1.Greeter's bindings-only Chat method must be carried through on a trailing endpoint when the service is only name-only-covered by grpc-gateway")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // T4 — filterUncoveredServices: dedupes bindings services against recovered
 // ---------------------------------------------------------------------------
 
