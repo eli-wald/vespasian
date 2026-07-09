@@ -766,6 +766,54 @@ func TestGenerator_Generate_DescriptorsExceedByteCapErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "too large")
 }
 
+// TestGenerator_Generate_SynthesizedDescriptorsExceedCountCapErrors verifies
+// that the name-only synthesis path (GRPCSchema.Services, no reflection
+// FileDescriptors anywhere) is bounded by the combined-cap
+// enforceDescriptorCaps(merged) call in Generate immediately before
+// renderProto (QUAL-001). Reflection is empty for every endpoint, so
+// aggregateReflectionDescriptors produces an empty merged map and the
+// pre-parse guard trivially passes; mergeRecoveredServices then synthesizes
+// one file per distinct proto package via FileDescriptorsFromServices. Using
+// maxGRPCFileDescriptors+1 distinct packages (one service per package) forces
+// exactly maxGRPCFileDescriptors+1 synthesized files, which must trip the
+// authoritative combined-cap check.
+//
+// Mutation sensitivity: if the combined-cap call before renderProto (the
+// second enforceDescriptorCaps(merged) call in Generate, added by QUAL-001)
+// were removed, mergeRecoveredServices would still synthesize all 1001 files
+// (the pre-parse guard only runs on the empty reflection set and never sees
+// the synthesized files), and renderProto would proceed to parse and render
+// all 1001 synthetic descriptors successfully — Generate would return a
+// non-empty spec and nil error instead of the expected error. This test fails
+// under that mutation.
+func TestGenerator_Generate_SynthesizedDescriptorsExceedCountCapErrors(t *testing.T) {
+	g := &Generator{}
+
+	numServices := maxGRPCFileDescriptors + 1
+	endpoints := make([]classify.ClassifiedRequest, 0, numServices)
+	for i := 0; i < numServices; i++ {
+		endpoints = append(endpoints, classify.ClassifiedRequest{
+			APIType: "grpc",
+			GRPCSchema: &classify.GRPCReflectionResult{
+				ReflectionEnabled: false, // name-only technique; no FileDescriptors
+				Services: []classify.GRPCService{
+					{
+						Name: fmt.Sprintf("pkg%d.Svc%d", i, i), // distinct package per service -> distinct synthesized file
+						Methods: []classify.GRPCMethod{
+							{Name: "M", InputType: "Req", OutputType: "Resp"},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	spec, err := g.Generate(endpoints)
+	require.Error(t, err)
+	assert.Empty(t, spec)
+	assert.Contains(t, err.Error(), "too many gRPC file descriptors")
+}
+
 // TestGenerator_Generate_MalformedDescriptorErrors verifies that Generate
 // surfaces a proto.Unmarshal failure on a descriptor blob that is non-empty and
 // within both the count and byte caps but is not valid protobuf wire format.

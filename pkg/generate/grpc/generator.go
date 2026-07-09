@@ -72,7 +72,11 @@ func (g *Generator) Generate(endpoints []classify.ClassifiedRequest) ([]byte, er
 		return nil, err
 	}
 
-	// Enforce caps on the reflection descriptors BEFORE any parse (SEC-BE-001).
+	// Pre-parse guard: cap the reflection descriptors BEFORE mergeRecoveredServices
+	// parses them (SEC-BE-001). This bounds the parseDescriptorSet(merged) call
+	// that extracts reflected message/service FQNs from untrusted reflection bytes
+	// before synthesis runs. It is NOT the authoritative ceiling — that is the
+	// combined-set cap below.
 	if err := enforceDescriptorCaps(merged); err != nil {
 		return nil, err
 	}
@@ -84,6 +88,16 @@ func (g *Generator) Generate(endpoints []classify.ClassifiedRequest) ([]byte, er
 
 	if len(merged) == 0 {
 		return nil, errors.New("gRPC spec generation requires server reflection or recovered service names; none available")
+	}
+
+	// Authoritative ceiling (QUAL-001): enforce the caps ONCE on the fully-merged
+	// descriptor set (reflection + synthesized) before renderProto parses/renders
+	// it. This bounds the combined set at 1x (count <= maxGRPCFileDescriptors,
+	// aggregate bytes <= maxGRPCDescriptorBytes) and fails closed. It subsumes any
+	// per-source synth cap: reflection is added first, then synth; if the combined
+	// set exceeds the cap the whole generate fails closed.
+	if err := enforceDescriptorCaps(merged); err != nil {
+		return nil, err
 	}
 
 	return renderProto(merged)
@@ -121,14 +135,21 @@ func aggregateReflectionDescriptors(endpoints []classify.ClassifiedRequest) (map
 }
 
 // enforceDescriptorCaps checks the descriptor-count and aggregate-byte caps on a
-// descriptor set BEFORE it is parsed (SEC-BE-001). It guards both untrusted
-// sources on the parse input: the reflection descriptors carried by a capture
-// (the offline `generate` entry point cannot trust they were bounded by the
-// probe) and the descriptors synthesized from recovered service names (which
-// originate from untrusted target OpenAPI docs, JS bundles, and any persisted
-// grpc_schema.services in an imported capture). Applying the same limits
-// pkg/probe enforces keeps a hostile or oversized set from amplifying into an
-// unbounded parse.
+// descriptor set before it is parsed (SEC-BE-001). Generate invokes it twice:
+//
+//   - As a pre-parse guard on the reflection descriptors alone, before
+//     mergeRecoveredServices parses them to extract reflected FQNs. The offline
+//     `generate` entry point cannot trust the capture's reflection bytes were
+//     bounded by the probe, so this bounds that first parse.
+//   - As the authoritative ceiling on the FULLY-MERGED set (reflection +
+//     synthesized) before renderProto parses/renders it. This is the single hard
+//     limit on what is parsed/rendered: the combined count and aggregate bytes are
+//     bounded at 1x. The synthesized descriptors originate from untrusted target
+//     OpenAPI docs, JS bundles, and any persisted grpc_schema.services in an
+//     imported capture, so folding them into this one ceiling keeps a hostile or
+//     oversized set from amplifying into an unbounded parse.
+//
+// Applying the same limits pkg/probe enforces keeps both parse inputs bounded.
 func enforceDescriptorCaps(fds map[string][]byte) error {
 	if len(fds) > maxGRPCFileDescriptors {
 		return fmt.Errorf("too many gRPC file descriptors: %d (max %d)", len(fds), maxGRPCFileDescriptors)
@@ -179,16 +200,9 @@ func mergeRecoveredServices(merged map[string][]byte, endpoints []classify.Class
 	if err != nil {
 		return err
 	}
-	// Cap the synthesized set BEFORE merging it into the parse input, mirroring
-	// the reflection-path guard (SEC-BE-001). synthFDs is built from UNTRUSTED
-	// recovered service names (target OpenAPI docs, JS bundles, and any
-	// grpc_schema.services persisted in an imported capture), so a hostile or
-	// huge recovered-service set could otherwise amplify into an unbounded
-	// descriptor set that renderProto parses. The same count + aggregate-byte
-	// limits and error format apply as for reflection descriptors.
-	if err := enforceDescriptorCaps(synthFDs); err != nil {
-		return err
-	}
+	// The synthesized set is merged in unbounded here; the authoritative combined
+	// ceiling (Generate, after this returns) caps the reflection+synth total in
+	// one pass, so a separate synth-only cap would be a redundant double-check.
 	for name, raw := range synthFDs {
 		merged[name] = raw
 	}
