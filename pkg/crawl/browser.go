@@ -17,6 +17,7 @@ package crawl
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"sync"
 
 	"github.com/go-rod/rod"
@@ -31,7 +32,8 @@ type BrowserOptions struct {
 	// NoSandbox disables Chrome's OS-level sandbox. This removes a primary
 	// exploit mitigation barrier and should only be set in containerized or
 	// CI environments where the sandbox cannot be enabled (e.g., Docker
-	// without --cap-add SYS_ADMIN).
+	// without --cap-add SYS_ADMIN). The sandbox is also disabled when the
+	// VESPASIAN_NO_SANDBOX environment variable is set to "true".
 	NoSandbox bool
 
 	// ChromePath overrides the Chrome binary used by the launcher. This value
@@ -55,13 +57,14 @@ type BrowserManager struct {
 	cleanupOnce sync.Once
 }
 
-// NewBrowserManager launches a Chrome instance with the given options and
-// returns a manager that owns its lifecycle.
-func NewBrowserManager(opts BrowserOptions) (*BrowserManager, error) {
+// configureLauncher applies BrowserOptions to a new launcher without
+// launching Chrome. Disables the sandbox when opts.NoSandbox is set or
+// when the VESPASIAN_NO_SANDBOX env var is "true" (set by CI workflows).
+func configureLauncher(opts BrowserOptions) (*launcher.Launcher, error) {
 	l := launcher.New().
 		Headless(opts.Headless)
 
-	if opts.NoSandbox {
+	if opts.NoSandbox || os.Getenv("VESPASIAN_NO_SANDBOX") == "true" {
 		l = l.NoSandbox(true)
 	}
 	if opts.ChromePath != "" {
@@ -72,6 +75,17 @@ func NewBrowserManager(opts BrowserOptions) (*BrowserManager, error) {
 			return nil, err
 		}
 		l = l.Set("proxy-server", opts.Proxy)
+	}
+
+	return l, nil
+}
+
+// NewBrowserManager launches a Chrome instance with the given options and
+// returns a manager that owns its lifecycle.
+func NewBrowserManager(opts BrowserOptions) (*BrowserManager, error) {
+	l, err := configureLauncher(opts)
+	if err != nil {
+		return nil, err
 	}
 
 	wsURL, err := l.Launch()

@@ -134,4 +134,7 @@ See `test/README.md` for how to run the suite, including the `TEST_HOST` overrid
 
 ## CI
 
-GitHub Actions runs on push to main and PRs: build, test (with 80% coverage threshold), lint (golangci-lint v2), and format check.
+GitHub Actions runs on push to main and PRs:
+
+- **ci.yml**: Build, test (`go test -race`, 80% coverage threshold), lint (golangci-lint v2), and format check. Runs on all pushes and PRs.
+- **live-tests.yml**: Two parallel jobs — **offline-tests** (imports, deterministic generates, classifier/spec edge cases; no services or Chrome needed) and **live-tests** (boots REST, SOAP, GraphQL, and concat-SPA target services, installs Chrome, runs crawl-based end-to-end tests). Label-gated on PRs: add the `live-tests` label to trigger. Always runs on push to `main` and `workflow_dispatch`.
