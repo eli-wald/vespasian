@@ -120,19 +120,21 @@ func aggregateReflectionDescriptors(endpoints []classify.ClassifiedRequest) (map
 	return merged, nil
 }
 
-// enforceDescriptorCaps re-checks the descriptor-count and aggregate-byte caps
-// on the merged reflection descriptors BEFORE any parse (SEC-BE-001). The
-// offline `generate` entry point cannot trust that a capture's FileDescriptors
-// were bounded by the probe, so it re-checks the same limits pkg/probe enforces
-// rather than parsing an unbounded set. Synthetic descriptors are generated
-// later from bounded recovered service names, so the cap targets the untrusted
-// capture-derived set specifically.
-func enforceDescriptorCaps(merged map[string][]byte) error {
-	if len(merged) > maxGRPCFileDescriptors {
-		return fmt.Errorf("too many gRPC file descriptors: %d (max %d)", len(merged), maxGRPCFileDescriptors)
+// enforceDescriptorCaps checks the descriptor-count and aggregate-byte caps on a
+// descriptor set BEFORE it is parsed (SEC-BE-001). It guards both untrusted
+// sources on the parse input: the reflection descriptors carried by a capture
+// (the offline `generate` entry point cannot trust they were bounded by the
+// probe) and the descriptors synthesized from recovered service names (which
+// originate from untrusted target OpenAPI docs, JS bundles, and any persisted
+// grpc_schema.services in an imported capture). Applying the same limits
+// pkg/probe enforces keeps a hostile or oversized set from amplifying into an
+// unbounded parse.
+func enforceDescriptorCaps(fds map[string][]byte) error {
+	if len(fds) > maxGRPCFileDescriptors {
+		return fmt.Errorf("too many gRPC file descriptors: %d (max %d)", len(fds), maxGRPCFileDescriptors)
 	}
 	var totalBytes int
-	for _, raw := range merged {
+	for _, raw := range fds {
 		totalBytes += len(raw)
 	}
 	if totalBytes > maxGRPCDescriptorBytes {
@@ -175,6 +177,16 @@ func mergeRecoveredServices(merged map[string][]byte, endpoints []classify.Class
 	}
 	synthFDs, err := FileDescriptorsFromServices(synthServices, reflectedMsgs)
 	if err != nil {
+		return err
+	}
+	// Cap the synthesized set BEFORE merging it into the parse input, mirroring
+	// the reflection-path guard (SEC-BE-001). synthFDs is built from UNTRUSTED
+	// recovered service names (target OpenAPI docs, JS bundles, and any
+	// grpc_schema.services persisted in an imported capture), so a hostile or
+	// huge recovered-service set could otherwise amplify into an unbounded
+	// descriptor set that renderProto parses. The same count + aggregate-byte
+	// limits and error format apply as for reflection descriptors.
+	if err := enforceDescriptorCaps(synthFDs); err != nil {
 		return err
 	}
 	for name, raw := range synthFDs {

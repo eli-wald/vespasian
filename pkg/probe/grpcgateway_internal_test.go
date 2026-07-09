@@ -358,6 +358,70 @@ func TestServicesFromOpenAPI_FQNNamingStrategyOperationIDRecoversFullServiceName
 	}
 }
 
+// ---------------------------------------------------------------------------
+// PR #160 review TEST-002 — serviceFromOperation info.title FQN-fallback
+// branch (grpcgateway.go ~line 279)
+// ---------------------------------------------------------------------------
+
+// TestServicesFromOpenAPI_ServiceFromOperationUsesTitleWhenNoFQNTag pins the
+// third branch of serviceFromOperation: when no operation tag is FQN-shaped,
+// but doc.Info.Title IS FQN-shaped (here via the ".vN." version-segment rule,
+// not the *Service suffix rule), the recovered service name must come from
+// the title — NOT from the operationId prefix fallback.
+//
+// The operationId prefix ("Greeter", from "Greeter_SayHello") is deliberately
+// different from the title ("greet.v1.Greeter") so that a correct result can
+// only come from the title branch; if serviceFromOperation instead fell
+// through to the operationId-prefix branch, the recovered name would be
+// "Greeter", not "greet.v1.Greeter".
+func TestServicesFromOpenAPI_ServiceFromOperationUsesTitleWhenNoFQNTag(t *testing.T) {
+	body := []byte(`{
+		"swagger": "2.0",
+		"info": {"title": "greet.v1.Greeter", "version": "1.0"},
+		"paths": {
+			"/v1/greet": {
+				"post": {
+					"operationId": "Greeter_SayHello",
+					"tags": ["greeter"],
+					"responses": {"200": {"description": "OK"}}
+				}
+			}
+		}
+	}`)
+
+	svcs := servicesFromOpenAPI(body)
+	if len(svcs) == 0 {
+		t.Fatal("servicesFromOpenAPI: expected at least one service, got none")
+	}
+
+	var names []string
+	var found bool
+	for _, s := range svcs {
+		names = append(names, s.Name)
+		if s.Name != "greet.v1.Greeter" {
+			continue
+		}
+		found = true
+		var hasMethod bool
+		for _, m := range s.Methods {
+			if m.Name == "SayHello" {
+				hasMethod = true
+			}
+		}
+		if !hasMethod {
+			t.Errorf("service greet.v1.Greeter: SayHello not found among methods %+v", s.Methods)
+		}
+	}
+	if !found {
+		t.Errorf("servicesFromOpenAPI: expected recovered service name %q (from info.title), got %v", "greet.v1.Greeter", names)
+	}
+	for _, n := range names {
+		if n == "Greeter" {
+			t.Errorf("servicesFromOpenAPI: recovered service name fell back to operationId prefix %q instead of info.title %q", "Greeter", "greet.v1.Greeter")
+		}
+	}
+}
+
 // TestIsGRPCGatewayDoc_FQNLowercaseLastSegmentRejected verifies the
 // serviceSegment fix does not over-loosen detection: an operationId prefix
 // whose LAST dot-segment is lowercase (e.g. "foo.bar.widget_List", last

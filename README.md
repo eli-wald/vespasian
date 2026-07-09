@@ -41,7 +41,7 @@ Vespasian takes a different approach: it observes actual network traffic at the 
 | **REST API Discovery** | Classifies REST endpoints via content-type, path patterns, and response structure; outputs OpenAPI 3.0 |
 | **GraphQL API Discovery** | Detects GraphQL endpoints, runs tiered introspection queries, and generates GraphQL SDL schemas |
 | **WSDL/SOAP Discovery** | Identifies SOAP services via SOAPAction headers and envelope detection; fetches and parses WSDL documents |
-| **gRPC API Discovery** | Classifies gRPC and gRPC-Web traffic via content-type, trailer headers, and path shape; enumerates services and methods through the Server Reflection Protocol and generates `.proto` schemas |
+| **gRPC API Discovery** | Classifies gRPC and gRPC-Web traffic via content-type, trailer headers, and path shape; enumerates services and methods through the Server Reflection Protocol — with reflection-off fallbacks (grpc-gateway/Envoy OpenAPI scrape and gRPC-Web JS-binding recovery) — and generates `.proto` schemas |
 | **API Type Auto-Detection** | Automatically determines API type (REST, GraphQL, WSDL) from captured traffic without manual selection. gRPC is opt-in via `--api-type grpc` — its binary HTTP/2 framing is not auto-detected |
 | **Browser Crawling** | Two backends: headless mode drives Chrome via [go-rod](https://github.com/go-rod/rod) for full JavaScript/SPA support; non-headless mode uses a stdlib net/http engine (DFS, 150 rps, scope+SSRF redirect guard) for lightweight crawls |
 | **SPA Bundle Extraction** | Post-crawl pass that scans JavaScript bundles for API path strings and probes them with raw HTTP, recovering endpoints the headless browser could not exercise |
@@ -231,7 +231,7 @@ Vespasian classifies and generates specifications for four API types:
 | **REST** | JSON/XML content-type, `/api/` `/v1/` path patterns, HTTP methods | OpenAPI 3.0 (YAML/JSON) | OPTIONS discovery, JSON, urlencoded, and multipart request-body inference |
 | **GraphQL** | `/graphql` path, query structure in POST body, `data`/`errors` response keys | GraphQL SDL | Tiered introspection queries (3 tiers for WAF bypass) |
 | **WSDL/SOAP** | SOAPAction header, SOAP envelope in body, `?wsdl` URL parameter | WSDL XML | Active `?wsdl` document fetching |
-| **gRPC** | `application/grpc`/`application/grpc-web*` content-type, `grpc-status`/`grpc-message` trailers, `/<pkg.Service>/<Method>` POST path | `.proto` (proto3) | Server Reflection Protocol enumeration (`--api-type grpc` only) |
+| **gRPC** | `application/grpc`/`application/grpc-web*` content-type, `grpc-status`/`grpc-message` trailers, `/<pkg.Service>/<Method>` POST path | `.proto` (proto3) | Server Reflection Protocol enumeration, with grpc-gateway OpenAPI + gRPC-Web JS-binding fallbacks when reflection is off (`--api-type grpc` only) |
 
 ### REST Classification Heuristics
 

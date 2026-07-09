@@ -36,8 +36,14 @@ const maxOpenAPIBodySize = 5 << 20 // 5 MB
 // tried per host, in order; the first valid grpc-gateway document wins.
 //
 // protoc-gen-openapiv2 commonly writes per-service files under
-// /openapiv2/<path>.swagger.json. A glob is not directly fetchable and we do
-// not attempt directory listing — only a common literal fallback is tried.
+// /openapiv2/<service>.swagger.json. Those per-service paths are intentionally
+// NOT attempted: the service name is not known before scraping (recovering it is
+// the whole point of this probe), so we cannot enumerate <service>.swagger.json
+// without first guessing names, and a glob is not directly fetchable. The path
+// list is instead kept a fixed, small set of common literals — deliberately
+// bounded for SSRF hygiene (a bounded, host-relative fetch surface) rather than
+// expanded via directory listing or name enumeration. Only a common literal
+// per-service fallback (/openapiv2/service.swagger.json) is tried.
 var grpcGatewayOpenAPIPaths = []string{
 	"/swagger.json",
 	"/swagger/v1/swagger.json",

@@ -20,7 +20,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"time"
 
 	"github.com/praetorian-inc/vespasian/pkg/classify"
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
@@ -106,16 +105,23 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 		cfg := probe.DefaultConfig()
 		cfg.GRPCInsecureSkipVerify = opts.GRPCInsecureSkipVerify
 		if opts.AllowPrivate {
+			// allow-private disables ONLY SSRF protection (URLValidator +
+			// DialContext re-resolution). Clone probe's default transport and
+			// override just DialContext with a plain net.Dialer so every other
+			// default (TLS/idle timeouts, and any future proxy/CA settings) is
+			// preserved rather than dropped by a hand-rolled bare transport. The
+			// client otherwise mirrors probe's default client (CheckRedirect only).
 			cfg.URLValidator = func(string) error { return nil }
+			transport := probe.DefaultTransport()
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			}
 			cfg.Client = &http.Client{
-				Timeout: 15 * time.Second,
 				CheckRedirect: func(req *http.Request, via []*http.Request) error {
 					return http.ErrUseLastResponse
 				},
-				Transport: &http.Transport{
-					TLSHandshakeTimeout:   10 * time.Second,
-					ResponseHeaderTimeout: 10 * time.Second,
-				},
+				Transport: transport,
 			}
 			cfg.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
 				var d net.Dialer
