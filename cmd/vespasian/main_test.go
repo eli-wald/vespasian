@@ -898,6 +898,7 @@ func TestDangerousAllowPrivate_GenerateCmd(t *testing.T) {
 	cmd := &GenerateCmd{
 		APIType:               "rest",
 		Capture:               capturePath,
+		Output:                filepath.Join(t.TempDir(), "spec.json"),
 		Probe:                 true,
 		DangerousAllowPrivate: true,
 	}
@@ -984,6 +985,9 @@ func TestGRPCInsecureSkipVerify_GenerateCmd(t *testing.T) {
 	cmd := &GenerateCmd{
 		APIType: "rest",
 		Capture: capturePath,
+		// Output goes to a temp file so a successful Run() doesn't write the
+		// generated spec to stdout during the test.
+		Output: filepath.Join(t.TempDir(), "spec.json"),
 		// Probe stays false: GRPCInsecureSkipVerify is consumed only by the
 		// gRPC reflection probe, which this REST capture never reaches, so
 		// Probe:true would add zero coverage of the flag while making a live
