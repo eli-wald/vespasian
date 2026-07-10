@@ -58,6 +58,9 @@ jobs:
         with:
           node-version: 20
 
+      - name: Build vespasian
+        run: go build -o bin/vespasian ./cmd/vespasian
+
       - name: Write stub config for offline tests
         run: |
           printf '%s\n' \
