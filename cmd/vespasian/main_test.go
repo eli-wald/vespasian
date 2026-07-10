@@ -953,7 +953,8 @@ func TestGRPCInsecureSkipVerify_Embedded(t *testing.T) {
 // pipeline.Options inside Run() — a REST capture never reaches the gRPC
 // probe path that consumes it, and pipeline.Options is built inline with no
 // inspectable seam. That semantic behavior is covered by internal/pipeline's
-// TestClassifyProbeGenerate_GRPCInsecureSkipVerify.
+// TestClassifyProbeGenerate_GRPCInsecureSkipVerify. Probe stays false (see
+// below) since this test never exercises the gRPC probe path anyway.
 func TestGRPCInsecureSkipVerify_GenerateCmd(t *testing.T) {
 	requests := []crawl.ObservedRequest{
 		{
@@ -981,9 +982,13 @@ func TestGRPCInsecureSkipVerify_GenerateCmd(t *testing.T) {
 	_ = f.Close()
 
 	cmd := &GenerateCmd{
-		APIType:                "rest",
-		Capture:                capturePath,
-		Probe:                  true,
+		APIType: "rest",
+		Capture: capturePath,
+		// Probe stays false: GRPCInsecureSkipVerify is consumed only by the
+		// gRPC reflection probe, which this REST capture never reaches, so
+		// Probe:true would add zero coverage of the flag while making a live
+		// network call to example.com. Keep this smoke test hermetic.
+		Probe:                  false,
 		GRPCInsecureSkipVerify: true,
 	}
 	if err := cmd.Run(); err != nil {
