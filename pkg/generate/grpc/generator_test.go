@@ -814,6 +814,44 @@ func TestGenerator_Generate_SynthesizedDescriptorsExceedCountCapErrors(t *testin
 	assert.Contains(t, err.Error(), "too many gRPC file descriptors")
 }
 
+// TestGenerator_Generate_SynthesizedServicesOverSynthesisCapStillErrors verifies
+// that capSynthesizedServices' pre-marshal truncation (SEC-BE-001) does not
+// undermine the combined descriptor cap. A recovered-service set of
+// maxSynthesizedPackages+50 distinct packages gets truncated by
+// capSynthesizedServices to exactly maxSynthesizedPackages (= maxGRPCFileDescriptors+1)
+// synthesized files, which still exceeds maxGRPCFileDescriptors and must be
+// rejected by Generate's authoritative combined-cap check. This pins the "one
+// past the combined cap" headroom documented on maxSynthesizedPackages:
+// truncating at exactly maxGRPCFileDescriptors instead would let this
+// over-limit set slip under the combined cap and succeed.
+func TestGenerator_Generate_SynthesizedServicesOverSynthesisCapStillErrors(t *testing.T) {
+	g := &Generator{}
+
+	numServices := maxSynthesizedPackages + 50
+	endpoints := make([]classify.ClassifiedRequest, 0, numServices)
+	for i := 0; i < numServices; i++ {
+		endpoints = append(endpoints, classify.ClassifiedRequest{
+			APIType: "grpc",
+			GRPCSchema: &classify.GRPCReflectionResult{
+				ReflectionEnabled: false, // name-only technique; no FileDescriptors
+				Services: []classify.GRPCService{
+					{
+						Name: fmt.Sprintf("pkg%d.Svc%d", i, i), // distinct package per service -> distinct synthesized file
+						Methods: []classify.GRPCMethod{
+							{Name: "M", InputType: "Req", OutputType: "Resp"},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	spec, err := g.Generate(endpoints)
+	require.Error(t, err)
+	assert.Empty(t, spec)
+	assert.Contains(t, err.Error(), "too many gRPC file descriptors")
+}
+
 // TestGenerator_Generate_MalformedDescriptorErrors verifies that Generate
 // surfaces a proto.Unmarshal failure on a descriptor blob that is non-empty and
 // within both the count and byte caps but is not valid protobuf wire format.

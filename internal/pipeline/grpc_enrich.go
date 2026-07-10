@@ -72,7 +72,14 @@ func seedGRPCHostEndpoints(requests []crawl.ObservedRequest, classified []classi
 
 // grpcHostKey returns the scheme://host[:port] key for a request URL, or ""
 // when the URL cannot be parsed or carries no host. The original scheme is
-// preserved; the probes themselves map grpc/grpcs↔http/https as needed.
+// preserved (empty→https); the probes themselves map grpc/grpcs↔http/https as
+// needed.
+//
+// Note: pkg/probe.openAPIBaseURL performs a similar URL→scheme://host parse but
+// intentionally maps grpc/grpcs→http/https (it fetches the gateway's HTTP
+// document). This helper instead PRESERVES the original scheme. The
+// scheme-handling difference is deliberate — they are not equivalent, do not
+// unify them into one shared helper (Rule of Three not met).
 func grpcHostKey(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
@@ -182,6 +189,25 @@ func enrichGRPCFromBindings(requests []crawl.ObservedRequest, enriched []classif
 // filterUncoveredServices returns the subset of services whose FQN is not
 // already recovered (in GRPCSchema.Services) by any endpoint in enriched.
 // Leading dots are stripped before comparison so ".pkg.S" and "pkg.S" match.
+//
+// Coverage is keyed on GRPCSchema.Services — the durable, per-FQN signal —
+// rather than on FileDescriptors. This is deliberate and correct for both
+// paths: the live reflection probe records each service in .Services via
+// extractService (pkg/probe.runReflection), and imported captures persist
+// .Services but NOT FileDescriptors (json:"-"), so .Services is the only signal
+// that survives a capture round-trip. Precise per-FQN dedup of the rare
+// reflection endpoint that carries FileDescriptors but an empty/partial
+// .Services (e.g. the probe's descriptor budget was exhausted mid-enumeration,
+// or one file declares several services) would require parsing the descriptor
+// bytes — an expensive parseDescriptorSet we intentionally avoid here — and
+// keying on len(FileDescriptors)>0 cannot recover per-FQN coverage without
+// over-dropping legitimate bindings-only services. That rare case is not a bug:
+// a bindings FQN already defined by reflection is carried through as a redundant
+// trailing synthetic endpoint, and the generator's unionRecoveredServices →
+// reflectedFQNs backstop (which DOES parse the merged FileDescriptors) drops it,
+// so the emitted .proto is correct. See nameOnlyCoveredServices, which keys on
+// the same .Services signal and only uses ReflectionEnabled || FileDescriptors>0
+// to bucket an endpoint as reflection vs name-only (not for per-FQN coverage).
 func filterUncoveredServices(services []classify.GRPCService, enriched []classify.ClassifiedRequest) []classify.GRPCService {
 	covered := map[string]bool{}
 	for i := range enriched {

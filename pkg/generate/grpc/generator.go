@@ -72,13 +72,20 @@ func (g *Generator) Generate(endpoints []classify.ClassifiedRequest) ([]byte, er
 		return nil, err
 	}
 
-	// Pre-parse guard: cap the reflection descriptors BEFORE mergeRecoveredServices
-	// parses them (SEC-BE-001). This bounds the parseDescriptorSet(merged) call
-	// that extracts reflected message/service FQNs from untrusted reflection bytes
-	// before synthesis runs. It is NOT the authoritative ceiling — that is the
-	// combined-set cap below.
-	if err := enforceDescriptorCaps(merged); err != nil {
-		return nil, err
+	// Pre-parse guard (QUAL-003): cap the reflection descriptors BEFORE
+	// mergeRecoveredServices parses them (SEC-BE-001). This bounds the
+	// parseDescriptorSet(merged) call that extracts reflected message/service FQNs
+	// from untrusted reflection bytes before synthesis runs. It applies ONLY when
+	// reflection descriptors are present: on the name-only path (gateway-only or
+	// bindings-only capture) merged is empty, mergeRecoveredServices skips the
+	// parse (its len(merged)==0 branch), and there is nothing to bound here — the
+	// combined-set cap below is then the sole effective bound. The len(merged)>0
+	// guard makes that applicability explicit. This is NOT the authoritative
+	// ceiling in either case — the combined-set cap below is.
+	if len(merged) > 0 {
+		if err := enforceDescriptorCaps(merged); err != nil {
+			return nil, err
+		}
 	}
 
 	// Union name-only recovered services and synthesize them into merged.

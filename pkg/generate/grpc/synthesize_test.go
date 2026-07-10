@@ -15,6 +15,7 @@
 package grpc
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,6 +23,25 @@ import (
 
 	"github.com/praetorian-inc/vespasian/pkg/classify"
 )
+
+// distinctPackageServices builds n classify.GRPCService values, each in its
+// own distinct proto package ("pkg0.Svc0", "pkg1.Svc1", ...), mirroring the
+// construction pattern used by
+// TestGenerator_Generate_SynthesizedDescriptorsExceedCountCapErrors in
+// generator_test.go. Each service has a single valid method so it survives
+// buildService's name validation.
+func distinctPackageServices(n int) []classify.GRPCService {
+	services := make([]classify.GRPCService, n)
+	for i := 0; i < n; i++ {
+		services[i] = classify.GRPCService{
+			Name: fmt.Sprintf("pkg%d.Svc%d", i, i),
+			Methods: []classify.GRPCMethod{
+				{Name: "M", InputType: "Req", OutputType: "Resp"},
+			},
+		}
+	}
+	return services
+}
 
 // roundTripProto synthesizes descriptors from services, wraps them in a
 // ClassifiedRequest, and drives the Generator to get the rendered .proto text.
@@ -404,4 +424,43 @@ func TestSyntheticFileName_PackageToPath(t *testing.T) {
 			assert.True(t, ok, "expected map key %q, got %v", tc.wantKeyPart, fds)
 		})
 	}
+}
+
+// TestCapSynthesizedServices_TruncatesBeyondCap verifies that
+// capSynthesizedServices (SEC-BE-001) bounds an over-limit recovered-service
+// set to at most maxSynthesizedPackages distinct proto packages, rather than
+// passing every recovered service through to the pre-cap marshal unbounded.
+//
+// Mutation sensitivity: if capSynthesizedServices were gutted to the identity
+// function (`return services`), this test would receive all
+// maxSynthesizedPackages+50 services back, and both the length assertion and
+// the distinct-package-count assertion below would fail.
+func TestCapSynthesizedServices_TruncatesBeyondCap(t *testing.T) {
+	const overflow = 50
+	services := distinctPackageServices(maxSynthesizedPackages + overflow)
+
+	capped := capSynthesizedServices(services)
+
+	require.Less(t, len(capped), len(services), "capped set must be smaller than the input set")
+	assert.Len(t, capped, maxSynthesizedPackages, "capped set must contain exactly maxSynthesizedPackages services (one per distinct package)")
+
+	pkgs := map[string]bool{}
+	for _, svc := range capped {
+		pkg, _ := splitServiceFQN(svc.Name)
+		pkgs[pkg] = true
+	}
+	assert.LessOrEqual(t, len(pkgs), maxSynthesizedPackages, "capped set must not exceed maxSynthesizedPackages distinct packages")
+}
+
+// TestCapSynthesizedServices_NoTruncationUnderCap verifies that a
+// recovered-service set well under maxSynthesizedPackages distinct packages
+// is returned unchanged: capSynthesizedServices must not over-eagerly
+// truncate normal-size inputs.
+func TestCapSynthesizedServices_NoTruncationUnderCap(t *testing.T) {
+	services := distinctPackageServices(5)
+
+	capped := capSynthesizedServices(services)
+
+	require.Len(t, capped, len(services))
+	assert.Equal(t, services, capped, "under-cap input must be returned unchanged")
 }

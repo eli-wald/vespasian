@@ -421,6 +421,12 @@ func isDottedProtoIdent(s string) bool {
 // documents from a gRPC endpoint URL. grpc/grpcs schemes are mapped to
 // http/https since the gateway exposes HTTP. Returns "" on parse failure or
 // when no host is present.
+//
+// Note: internal/pipeline.grpcHostKey performs a similar URL→scheme://host parse
+// but intentionally PRESERVES the original scheme (defaulting empty→https). This
+// helper instead maps grpc/grpcs→http/https for the HTTP gateway fetch. The
+// scheme-handling difference is deliberate — they are not equivalent, do not
+// unify them into one shared helper (Rule of Three not met).
 func openAPIBaseURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {

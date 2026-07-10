@@ -70,6 +70,18 @@ func FileDescriptorsFromServices(services []classify.GRPCService, reflectedMsgs 
 		return nil, errors.New("no services provided")
 	}
 
+	// SEC-BE-001: bound the pre-cap synthesis. This function marshals roughly one
+	// FileDescriptorProto per distinct proto package (marshalBuilders → one
+	// proto.Marshal each) BEFORE the generator's authoritative combined
+	// descriptor cap runs on the merged reflection+synth set, so an oversized or
+	// hostile recovered-service set could drive an unbounded intermediate marshal.
+	// Truncate services to at most maxSynthesizedPackages (= maxGRPCFileDescriptors
+	// + 1) distinct packages: one past the combined cap, so the marshal is bounded
+	// to O(cap) files while the combined cap in Generate still observes the
+	// overflow and fails closed (never errors here). Normal-size inputs stay far
+	// below the cap and are byte-identical.
+	services = capSynthesizedServices(services)
+
 	// Builders accumulate per-package descriptor state before marshaling. The
 	// map key is the proto package (may be empty for unqualified service names).
 	builders := map[string]*fileBuilder{}
@@ -290,6 +302,43 @@ func (b *fileBuilder) build() (*descriptorpb.FileDescriptorProto, error) {
 	fdp.Service = b.services
 
 	return fdp, nil
+}
+
+// maxSynthesizedPackages bounds the distinct proto packages capSynthesizedServices
+// will admit. It is maxGRPCFileDescriptors+1 — deliberately ONE past the combined
+// descriptor cap — so the intermediate marshal stays bounded to O(cap) files
+// while the overflow remains visible to the generator's authoritative combined
+// cap (enforceDescriptorCaps), which still observes >maxGRPCFileDescriptors files
+// on the final merged set and fails closed. Truncating at exactly
+// maxGRPCFileDescriptors would instead let a would-be-rejected set slip under the
+// combined cap and silently succeed, changing that cap's error behavior.
+const maxSynthesizedPackages = maxGRPCFileDescriptors + 1
+
+// capSynthesizedServices bounds the recovered-service set fed to synthesis
+// (SEC-BE-001) so the pre-cap marshal in FileDescriptorsFromServices stays
+// proportional to the input. One synthesized file is produced per distinct proto
+// package, so services are retained until they would span more than
+// maxSynthesizedPackages distinct packages; the remaining services are truncated
+// and the overflow logged at debug level. It never errors — the generator's
+// authoritative combined descriptor cap fails closed on the merged set (see
+// maxSynthesizedPackages for why the bound is cap+1, not cap). When the input is
+// within bounds the original slice is returned unchanged, so normal inputs are
+// byte-identical.
+func capSynthesizedServices(services []classify.GRPCService) []classify.GRPCService {
+	pkgs := map[string]bool{}
+	for i, svc := range services {
+		pkg, _ := splitServiceFQN(svc.Name)
+		if pkgs[pkg] {
+			continue
+		}
+		if len(pkgs) >= maxSynthesizedPackages {
+			slog.Debug("grpc synthesize: truncating recovered services beyond descriptor cap",
+				"cap", maxSynthesizedPackages, "kept", i, "total", len(services))
+			return services[:i]
+		}
+		pkgs[pkg] = true
+	}
+	return services
 }
 
 // splitServiceFQN splits a service FQN into (package, localName). A name with
