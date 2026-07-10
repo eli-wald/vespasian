@@ -29,6 +29,19 @@
 //     Unimplemented), the probe returns a structured GRPCReflectionResult
 //     with ReflectionEnabled=false to distinguish "probed but disabled" from
 //     "not probed at all" (which is signaled by a nil result).
+//   - [GRPCGatewayProbe]: reflection-off recovery of gRPC service/method names
+//     from a grpc-gateway/Envoy OpenAPI (swagger) document served alongside the
+//     HTTP/JSON transcoding gateway. Scrapes a bounded set of well-known
+//     document paths over HTTP, recognizes grpc-gateway documents by their
+//     operationId/tags shape, and records the recovered service names on the
+//     endpoint's GRPCSchema. The scraped path set is a fixed, small list of
+//     common literals; per-service swagger files (/openapiv2/<service>.swagger.json)
+//     are intentionally not enumerated (the service name is unknown before
+//     scraping and the list is bounded for SSRF hygiene). It does not synthesize
+//     descriptors itself —
+//     descriptor generation from those names is deferred to pkg/generate/grpc.
+//     Defers to a reflection result when one is already present (reflection has
+//     real message fields).
 //
 // SSRF protection is built in: [ValidateProbeURL] blocks requests to private
 // and loopback addresses (RFC 1918, RFC 4193, link-local) with DNS rebinding

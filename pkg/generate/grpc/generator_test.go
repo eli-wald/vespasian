@@ -16,6 +16,8 @@ package grpc
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -202,6 +204,312 @@ func TestGenerator_Generate_SkipsWellKnownImports(t *testing.T) {
 	assert.NotContains(t, output, "google/protobuf/timestamp.proto")
 	assert.NotContains(t, output, "message Timestamp")
 	assert.Contains(t, output, "service UserService")
+}
+
+// ---------------------------------------------------------------------------
+// T1 — Reflection + bindings, same service FQN, through Generate
+// ---------------------------------------------------------------------------
+
+// TestGenerator_Generate_ReflectionWinsOverBindingsSameFQN reproduces the
+// original review bug (LAB-3864): reflection provides real FileDescriptors
+// defining pkg.FooService; a bindings-style endpoint carries the same FQN
+// with ReflectionEnabled=false and no FileDescriptors. Generate must produce
+// no error, no duplicate symbol, and the output must contain real message
+// fields (reflection wins, the synthetic stub is dropped).
+func TestGenerator_Generate_ReflectionWinsOverBindingsSameFQN(t *testing.T) {
+	// Build a real FileDescriptorProto with a real message field.
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("pkg/foo.proto"),
+		Package: proto.String("pkg"),
+		Syntax:  proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{
+				Name: proto.String("BarRequest"),
+				Field: []*descriptorpb.FieldDescriptorProto{
+					{
+						Name:     proto.String("real_field"),
+						Number:   proto.Int32(1),
+						Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+						Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+						JsonName: proto.String("realField"),
+					},
+				},
+			},
+			{
+				Name:  proto.String("BarResponse"),
+				Field: []*descriptorpb.FieldDescriptorProto{},
+			},
+		},
+		Service: []*descriptorpb.ServiceDescriptorProto{
+			{
+				Name: proto.String("FooService"),
+				Method: []*descriptorpb.MethodDescriptorProto{
+					{
+						Name:       proto.String("Bar"),
+						InputType:  proto.String(".pkg.BarRequest"),
+						OutputType: proto.String(".pkg.BarResponse"),
+					},
+				},
+			},
+		},
+	}
+	raw, err := proto.Marshal(fdp)
+	require.NoError(t, err)
+
+	// Endpoint A: real reflection result — FileDescriptors populated.
+	reflectionEP := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			ReflectionEnabled: true,
+			FileDescriptors:   map[string][]byte{"pkg/foo.proto": raw},
+			Services: []classify.GRPCService{
+				{Name: "pkg.FooService", Methods: []classify.GRPCMethod{{Name: "Bar", InputType: "BarRequest", OutputType: "BarResponse"}}},
+			},
+		},
+	}
+
+	// Endpoint B: bindings-style — same FQN, ReflectionEnabled=false, no FileDescriptors.
+	bindingsEP := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			ReflectionEnabled: false,
+			Services: []classify.GRPCService{
+				{Name: "pkg.FooService", Methods: []classify.GRPCMethod{{Name: "Bar", InputType: "BarRequest", OutputType: "BarResponse"}}},
+			},
+		},
+	}
+
+	g := &Generator{}
+	out, err := g.Generate([]classify.ClassifiedRequest{reflectionEP, bindingsEP})
+	require.NoError(t, err, "Generate must not return a conflicting-descriptor or duplicate-symbol error")
+
+	output := string(out)
+	// Reflection wins: real message field must be present.
+	assert.Contains(t, output, "real_field", "reflection-defined field must appear in output (reflection wins)")
+	assert.Contains(t, output, "service FooService", "FooService must be present in output")
+	// Only one service definition — no duplicate symbol.
+	assert.Equal(t, 1, strings.Count(output, "service FooService"), "FooService must appear exactly once (no duplicate symbol)")
+}
+
+// ---------------------------------------------------------------------------
+// T2 — Gateway + bindings, same package different services, through Generate
+// ---------------------------------------------------------------------------
+
+// TestGenerator_Generate_TwoServicesOnePackageBothPresent reproduces the
+// second variant of the original review bug: gateway recovers greet.v1.Greeter,
+// bindings recover greet.v1.Farewell (different FQN, same package). Generate
+// must produce one coherent .proto, one package declaration, both services
+// present, no conflicting-file-descriptors or duplicate-symbol error.
+func TestGenerator_Generate_TwoServicesOnePackageBothPresent(t *testing.T) {
+	gatewayEP := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			ReflectionEnabled: false,
+			Services: []classify.GRPCService{
+				{Name: "greet.v1.Greeter", Methods: []classify.GRPCMethod{{Name: "SayHello", InputType: "HelloRequest", OutputType: "HelloResponse"}}},
+			},
+		},
+	}
+	bindingsEP := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			ReflectionEnabled: false,
+			Services: []classify.GRPCService{
+				{Name: "greet.v1.Farewell", Methods: []classify.GRPCMethod{{Name: "SayBye", InputType: "ByeRequest", OutputType: "ByeResponse"}}},
+			},
+		},
+	}
+
+	g := &Generator{}
+	out, err := g.Generate([]classify.ClassifiedRequest{gatewayEP, bindingsEP})
+	require.NoError(t, err, "Generate must not return a conflicting file descriptors or duplicate symbol error")
+
+	output := string(out)
+	// Single package declaration.
+	assert.Equal(t, 1, strings.Count(output, "package greet.v1"), "exactly one package declaration for greet.v1")
+	// Both services present.
+	assert.Contains(t, output, "service Greeter", "Greeter must be present")
+	assert.Contains(t, output, "service Farewell", "Farewell must be present")
+	assert.Contains(t, output, "rpc SayHello", "SayHello method must be present")
+	assert.Contains(t, output, "rpc SayBye", "SayBye method must be present")
+}
+
+// ---------------------------------------------------------------------------
+// T3 — Gateway partial coverage + bindings streaming method, through Generate
+// ---------------------------------------------------------------------------
+
+// TestGenerator_Generate_GreeterGatewayPrecedenceOverBindingsStreamingChat
+// pins gateway>bindings precedence at METHOD granularity through Generate: a
+// grpc-gateway-style endpoint (name-only, ReflectionEnabled=false) recovers
+// Greeter.SayHello as a unary method; a separate bindings-recovered endpoint
+// independently recovers the SAME Greeter FQN with a method of the SAME name
+// (SayHello) but a DIFFERENT (streaming) definition, plus a bindings-only
+// method (Chat) that grpc-gateway cannot transcode. The generated .proto must
+// contain BOTH SayHello and Chat on Greeter, with SayHello rendered using the
+// gateway's unary definition — proving precedence is resolved per-method
+// (method union), not by dropping or fully overwriting the service.
+func TestGenerator_Generate_GreeterGatewayPrecedenceOverBindingsStreamingChat(t *testing.T) {
+	gatewayEP := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			ReflectionEnabled: false,
+			Services: []classify.GRPCService{
+				{Name: "greet.v1.Greeter", Methods: []classify.GRPCMethod{
+					{Name: "SayHello", InputType: "HelloRequest", OutputType: "HelloResponse"},
+				}},
+			},
+		},
+	}
+	bindingsEP := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			ReflectionEnabled: false,
+			Services: []classify.GRPCService{
+				{Name: "greet.v1.Greeter", Methods: []classify.GRPCMethod{
+					// Same method name as the gateway's SayHello, but declared
+					// client-streaming here — a conflicting definition. The
+					// gateway's (higher-precedence) definition must win.
+					{Name: "SayHello", InputType: "HelloRequest", OutputType: "HelloResponse", ClientStreaming: true},
+					// Bindings-only method: grpc-gateway cannot transcode a
+					// client-streaming RPC, so only bindings recover it.
+					{Name: "Chat", InputType: "ChatRequest", OutputType: "ChatResponse", ClientStreaming: true},
+				}},
+			},
+		},
+	}
+
+	g := &Generator{}
+	// gatewayEP precedes bindingsEP, mirroring enrichGRPCFromBindings appending
+	// bindings on a trailing endpoint after the gateway's: reflection > gateway
+	// > bindings ordering, so the gateway's SayHello definition must win.
+	out, err := g.Generate([]classify.ClassifiedRequest{gatewayEP, bindingsEP})
+	require.NoError(t, err)
+
+	output := string(out)
+	assert.Contains(t, output, "service Greeter")
+	assert.Contains(t, output, "rpc SayHello", "SayHello (gateway-recovered) must be present")
+	assert.Contains(t, output, "rpc Chat", "Chat (bindings-only method) must be present in addition to SayHello")
+
+	// Prove gateway precedence at method granularity: SayHello must render
+	// unary (gateway's definition), while Chat (bindings-only, no gateway
+	// counterpart) keeps its streaming keyword.
+	sayHello := extractRPCSignature(t, output, "SayHello")
+	assert.NotContains(t, sayHello, "stream", "SayHello must keep the GATEWAY's unary definition, not bindings' conflicting streaming one")
+
+	chat := extractRPCSignature(t, output, "Chat")
+	assert.Contains(t, chat, "stream", "Chat (bindings-only) must carry its streaming keyword")
+}
+
+// extractRPCSignature returns the `rpc <method>(...) returns (...)` signature
+// text for method from a rendered .proto, so a test can assert on the
+// presence/absence of the `stream` keyword scoped to one specific method
+// (rather than anywhere in the file).
+func extractRPCSignature(t *testing.T, output, method string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?s)rpc\s+` + regexp.QuoteMeta(method) + `\s*\([^)]*\)\s*returns\s*\([^)]*\)`)
+	m := re.FindString(output)
+	require.NotEmpty(t, m, "rpc %s signature not found in output:\n%s", method, output)
+	return m
+}
+
+// ---------------------------------------------------------------------------
+// unionRecoveredServices unit tests (T-coverage: dedup-by-FQN + reflection-drop)
+// ---------------------------------------------------------------------------
+
+// TestUnionRecoveredServices_MergesMethodsAcrossSameFQN verifies that when two
+// endpoints carry the same service FQN, the union keeps BOTH endpoints'
+// distinctly-named methods (method-level union), and that on a method NAME
+// collision the first (higher-precedence) endpoint's method definition wins
+// rather than the later one's.
+func TestUnionRecoveredServices_MergesMethodsAcrossSameFQN(t *testing.T) {
+	ep1 := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			Services: []classify.GRPCService{
+				{Name: "pkg.Alpha", Methods: []classify.GRPCMethod{
+					{Name: "M1", InputType: "M1Request"},
+				}},
+			},
+		},
+	}
+	ep2 := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			Services: []classify.GRPCService{
+				{Name: "pkg.Alpha", Methods: []classify.GRPCMethod{
+					// Same method NAME as ep1's M1, but a DIFFERENT definition
+					// (different InputType, and streaming where ep1's is not).
+					// The merge must keep ep1's (first/higher-precedence) M1,
+					// not this one.
+					{Name: "M1", InputType: "M1RequestStream", ClientStreaming: true},
+					{Name: "M2"}, // new method name: must be added
+				}},
+				{Name: "pkg.Beta", Methods: []classify.GRPCMethod{{Name: "M3"}}},
+			},
+		},
+	}
+
+	result := unionRecoveredServices([]classify.ClassifiedRequest{ep1, ep2}, nil)
+	require.Len(t, result, 2, "should have Alpha (method-unioned) and Beta")
+
+	var names []string
+	for _, s := range result {
+		names = append(names, s.Name)
+	}
+	assert.Contains(t, names, "pkg.Alpha")
+	assert.Contains(t, names, "pkg.Beta")
+
+	for _, s := range result {
+		if s.Name != "pkg.Alpha" {
+			continue
+		}
+		require.Len(t, s.Methods, 2, "Alpha must contain both M1 and M2 (method union, not whole-service drop)")
+
+		var methodNames []string
+		byName := map[string]classify.GRPCMethod{}
+		for _, m := range s.Methods {
+			methodNames = append(methodNames, m.Name)
+			byName[m.Name] = m
+		}
+		assert.Contains(t, methodNames, "M1")
+		assert.Contains(t, methodNames, "M2", "M2 (new method name from ep2) must be added")
+
+		m1 := byName["M1"]
+		assert.Equal(t, "M1Request", m1.InputType, "merged Alpha.M1 must keep ep1's (first/higher-precedence) definition")
+		assert.False(t, m1.ClientStreaming, "merged Alpha.M1 must not pick up ep2's streaming flag")
+	}
+}
+
+// TestUnionRecoveredServices_DropsReflectedFQNs verifies that FQNs already
+// defined by the merged reflection descriptors are excluded from synthesis.
+func TestUnionRecoveredServices_DropsReflectedFQNs(t *testing.T) {
+	reflectedFQNs := map[string]bool{
+		"pkg.FooService": true,
+	}
+	ep := classify.ClassifiedRequest{
+		APIType: "grpc",
+		GRPCSchema: &classify.GRPCReflectionResult{
+			Services: []classify.GRPCService{
+				{Name: "pkg.FooService"}, // covered by reflection
+				{Name: "pkg.BarService"}, // not covered
+			},
+		},
+	}
+
+	result := unionRecoveredServices([]classify.ClassifiedRequest{ep}, reflectedFQNs)
+	require.Len(t, result, 1, "FooService (covered by reflection) must be dropped")
+	assert.Equal(t, "pkg.BarService", result[0].Name)
+}
+
+// TestUnionRecoveredServices_NilSchemaSkipped verifies endpoints with nil
+// GRPCSchema do not panic and are skipped.
+func TestUnionRecoveredServices_NilSchemaSkipped(t *testing.T) {
+	ep := classify.ClassifiedRequest{
+		APIType:    "grpc",
+		GRPCSchema: nil,
+	}
+	result := unionRecoveredServices([]classify.ClassifiedRequest{ep}, nil)
+	assert.Empty(t, result)
 }
 
 // danglingImportFileBytes builds a FileDescriptorProto that depends on a file
@@ -456,6 +764,92 @@ func TestGenerator_Generate_DescriptorsExceedByteCapErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, spec)
 	assert.Contains(t, err.Error(), "too large")
+}
+
+// TestGenerator_Generate_SynthesizedDescriptorsExceedCountCapErrors verifies
+// that the name-only synthesis path (GRPCSchema.Services, no reflection
+// FileDescriptors anywhere) is bounded by the combined-cap
+// enforceDescriptorCaps(merged) call in Generate immediately before
+// renderProto (QUAL-001). Reflection is empty for every endpoint, so
+// aggregateReflectionDescriptors produces an empty merged map and the
+// pre-parse guard trivially passes; mergeRecoveredServices then synthesizes
+// one file per distinct proto package via FileDescriptorsFromServices. Using
+// maxGRPCFileDescriptors+1 distinct packages (one service per package) forces
+// exactly maxGRPCFileDescriptors+1 synthesized files, which must trip the
+// authoritative combined-cap check.
+//
+// Mutation sensitivity: if the combined-cap call before renderProto (the
+// second enforceDescriptorCaps(merged) call in Generate, added by QUAL-001)
+// were removed, mergeRecoveredServices would still synthesize all 1001 files
+// (the pre-parse guard only runs on the empty reflection set and never sees
+// the synthesized files), and renderProto would proceed to parse and render
+// all 1001 synthetic descriptors successfully — Generate would return a
+// non-empty spec and nil error instead of the expected error. This test fails
+// under that mutation.
+func TestGenerator_Generate_SynthesizedDescriptorsExceedCountCapErrors(t *testing.T) {
+	g := &Generator{}
+
+	numServices := maxGRPCFileDescriptors + 1
+	endpoints := make([]classify.ClassifiedRequest, 0, numServices)
+	for i := 0; i < numServices; i++ {
+		endpoints = append(endpoints, classify.ClassifiedRequest{
+			APIType: "grpc",
+			GRPCSchema: &classify.GRPCReflectionResult{
+				ReflectionEnabled: false, // name-only technique; no FileDescriptors
+				Services: []classify.GRPCService{
+					{
+						Name: fmt.Sprintf("pkg%d.Svc%d", i, i), // distinct package per service -> distinct synthesized file
+						Methods: []classify.GRPCMethod{
+							{Name: "M", InputType: "Req", OutputType: "Resp"},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	spec, err := g.Generate(endpoints)
+	require.Error(t, err)
+	assert.Empty(t, spec)
+	assert.Contains(t, err.Error(), "too many gRPC file descriptors")
+}
+
+// TestGenerator_Generate_SynthesizedServicesOverSynthesisCapStillErrors verifies
+// that capSynthesizedServices' pre-marshal truncation (SEC-BE-001) does not
+// undermine the combined descriptor cap. A recovered-service set of
+// maxSynthesizedPackages+50 distinct packages gets truncated by
+// capSynthesizedServices to exactly maxSynthesizedPackages (= maxGRPCFileDescriptors+1)
+// synthesized files, which still exceeds maxGRPCFileDescriptors and must be
+// rejected by Generate's authoritative combined-cap check. This pins the "one
+// past the combined cap" headroom documented on maxSynthesizedPackages:
+// truncating at exactly maxGRPCFileDescriptors instead would let this
+// over-limit set slip under the combined cap and succeed.
+func TestGenerator_Generate_SynthesizedServicesOverSynthesisCapStillErrors(t *testing.T) {
+	g := &Generator{}
+
+	numServices := maxSynthesizedPackages + 50
+	endpoints := make([]classify.ClassifiedRequest, 0, numServices)
+	for i := 0; i < numServices; i++ {
+		endpoints = append(endpoints, classify.ClassifiedRequest{
+			APIType: "grpc",
+			GRPCSchema: &classify.GRPCReflectionResult{
+				ReflectionEnabled: false, // name-only technique; no FileDescriptors
+				Services: []classify.GRPCService{
+					{
+						Name: fmt.Sprintf("pkg%d.Svc%d", i, i), // distinct package per service -> distinct synthesized file
+						Methods: []classify.GRPCMethod{
+							{Name: "M", InputType: "Req", OutputType: "Resp"},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	spec, err := g.Generate(endpoints)
+	require.Error(t, err)
+	assert.Empty(t, spec)
+	assert.Contains(t, err.Error(), "too many gRPC file descriptors")
 }
 
 // TestGenerator_Generate_MalformedDescriptorErrors verifies that Generate

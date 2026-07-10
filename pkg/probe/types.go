@@ -80,6 +80,24 @@ func DefaultConfig() Config {
 	}
 }
 
+// DefaultTransport returns a new *http.Transport configured with the probe
+// package's default settings: the SSRF-safe dialer plus the TLS-handshake,
+// response-header, and idle-connection timeouts. It is the single source of
+// truth for the default transport — withDefaults uses it to build the default
+// Client, and callers that need to loosen exactly one setting (e.g. the
+// --dangerous-allow-private path, which swaps DialContext for a plain net.Dialer
+// to disable SSRF re-resolution) should clone it and override that one field
+// rather than hand-rolling a bare transport that would silently drop these (and
+// any future proxy/CA/idle) settings.
+func DefaultTransport() *http.Transport {
+	return &http.Transport{
+		DialContext:           ssrf.SafeDialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+}
+
 // withDefaults returns a copy of cfg with zero values replaced by defaults.
 func (cfg Config) withDefaults() Config {
 	if cfg.Timeout == 0 {
@@ -105,12 +123,7 @@ func (cfg Config) withDefaults() Config {
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
-			Transport: &http.Transport{
-				DialContext:           ssrf.SafeDialContext,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: 10 * time.Second,
-				IdleConnTimeout:       90 * time.Second,
-			},
+			Transport: DefaultTransport(),
 		}
 	}
 	return cfg
