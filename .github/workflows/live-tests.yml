@@ -35,13 +35,14 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-  # Runs all 25 test targets: offline (imports, generates, classifier/spec edge
-  # cases) and live (boots services, crawls, validates specs).
+  # Runs all 25 test targets in one job. Offline targets (imports, generates,
+  # classifier/spec edge cases) run first so a live-setup failure cannot mask
+  # deterministic coverage. Live targets boot services and crawl with Chrome.
   test:
     needs: check-label
     if: needs.check-label.outputs.should-run == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       VESPASIAN_NO_SANDBOX: "true"
     steps:
@@ -57,11 +58,16 @@ jobs:
         with:
           node-version: 20
 
+      - name: Run offline tests
+        run: |
+          ./test/run-live-tests.sh --no-start \
+            --targets import-burp,import-har,import-base64,import-mitmproxy,import-mitmproxy-native,import-unicode,import-duplicates,import-malformed,import-empty,generate-rest,generate-wsdl,generate-wsdl-matrix,generate-graphql,generate-graphql-imports,generate-js-static,generate-merge-slugs,crawl-unreachable,classifier-edge,spec-edge
+
       - name: Setup live targets
         run: ./test/setup-live-targets.sh
 
-      - name: Run tests
-        run: ./test/run-live-tests.sh --no-build
+      - name: Run live tests
+        run: ./test/run-live-tests.sh --no-build --targets rest-api,soap-service,graphql-server,concat-spa,edge-cases,crawl-depth
 
       - name: Upload results
         if: always()
