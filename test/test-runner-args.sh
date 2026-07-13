@@ -146,6 +146,16 @@ else
 fi
 rm -f "$tmpconfig"
 
+# --targets overrides --group: when both are set, targets wins.
+# We verify this by checking the runner's implementation: targets is parsed
+# before group, and group resolution is skipped when targets is non-empty.
+# Structural test: grep for the guard that enforces this.
+if grep -q 'if \[ -z "\$targets" \]' "$RUNNER"; then
+    pass "--targets overrides --group: guard present (if [ -z \"\$targets\" ])"
+else
+    fail "--targets overrides --group: guard missing from runner"
+fi
+
 echo ""
 echo "=== Summary ==="
 echo "  $PASS passed, $FAIL failed"

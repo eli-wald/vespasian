@@ -19,7 +19,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/.live-test-config"
+CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/.live-test-config}"
 RESULTS_DIR="${SCRIPT_DIR}/.results"
 VESPASIAN="${PROJECT_ROOT}/bin/vespasian"
 
@@ -2722,6 +2722,23 @@ PYEOF
 # Summary
 # ──────────────────────────────────────────────────────────────
 
+test_smoke_check() {
+    init_test_status "smoke-check"
+    local start=$SECONDS
+
+    log_header "Testing: smoke-check (binary sanity)"
+
+    if "$VESPASIAN" version >/dev/null 2>&1 || "$VESPASIAN" --help >/dev/null 2>&1; then
+        local duration=$((SECONDS - start))
+        set_test_result "smoke-check" "PASS" "-" "-" "$duration"
+        log_ok "smoke-check: PASSED (${duration}s)"
+    else
+        local duration=$((SECONDS - start))
+        set_test_result "smoke-check" "FAIL" "-" "-" "$duration"
+        log_fail "smoke-check: binary not functional (${duration}s)"
+    fi
+}
+
 print_summary() {
     local total_pass=0 total_fail=0 total_skip=0
 
@@ -2763,23 +2780,6 @@ print_summary() {
     return 0
 }
 
-test_smoke_check() {
-    init_test_status "smoke-check"
-    local start=$SECONDS
-
-    log_header "Testing: smoke-check (binary sanity)"
-
-    if "$VESPASIAN" version >/dev/null 2>&1 || "$VESPASIAN" --help >/dev/null 2>&1; then
-        local duration=$((SECONDS - start))
-        set_test_result "smoke-check" "PASS" "-" "-" "$duration"
-        log_ok "smoke-check: PASSED (${duration}s)"
-    else
-        local duration=$((SECONDS - start))
-        set_test_result "smoke-check" "FAIL" "-" "-" "$duration"
-        log_fail "smoke-check: binary not functional (${duration}s)"
-    fi
-}
-
 # ──────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────
@@ -2791,8 +2791,7 @@ usage() {
     echo "  --group <name>        Run a predefined target group: offline, live, or all (default: all)"
     echo "  --targets <list>      Comma-separated targets to test (overrides --group)"
     echo "                        Valid targets:"
-    echo "                          Live:       rest-api, soap-service, graphql-server, concat-spa,"
-    echo "                                      edge-cases, crawl-depth"
+    echo "                          Service:    rest-api, soap-service, graphql-server, concat-spa"
     echo "                          Config:     grpc-server (included via TARGETS_SETUP when set up)"
     echo "                          Generate:   generate-rest, generate-wsdl, generate-wsdl-matrix,"
     echo "                                      generate-graphql, generate-graphql-imports,"
