@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Tests for run-live-tests.sh --group flag and target resolution.
-# Does NOT run actual live tests — only validates argument parsing
-# and target-list construction.
+# Tests for run-live-tests.sh target group consistency and --group flag.
+# Does NOT run actual live tests — only validates that the group arrays
+# stay in sync with the case dispatch block.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNER="$SCRIPT_DIR/run-live-tests.sh"
 PASS=0
 FAIL=0
 
@@ -13,78 +14,87 @@ pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1" >&2; }
 
 # ── Source the target arrays and helper from the runner ──────────
-# We extract just the pieces we need without running main().
 
-source <(sed -n '/^OFFLINE_TARGETS=(/,/^)/p' "$SCRIPT_DIR/run-live-tests.sh")
-source <(sed -n '/^LIVE_TARGETS=(/,/^)/p' "$SCRIPT_DIR/run-live-tests.sh")
-source <(grep '^join_targets()' "$SCRIPT_DIR/run-live-tests.sh")
+source <(sed -n '/^OFFLINE_TARGETS=(/,/^)/p' "$RUNNER")
+source <(sed -n '/^LIVE_TARGETS=(/,/^)/p' "$RUNNER")
+source <(grep '^join_targets()' "$RUNNER")
 
-echo "=== Target group resolution ==="
+# ── Extract case-dispatch targets from the runner ────────────────
+# Matches lines like:  rest-api)      test_rest_api ;;
 
-# Test 1: --group offline produces exactly OFFLINE_TARGETS
-offline="$(join_targets "${OFFLINE_TARGETS[@]}")"
-offline_count=$(echo "$offline" | tr ',' '\n' | wc -l | tr -d ' ')
-if [[ "$offline_count" -eq 19 ]]; then
-    pass "--group offline: 19 targets"
+mapfile -t DISPATCH_TARGETS < <(
+    sed -nE 's/^[[:space:]]+([^)]+)\)[[:space:]]+test_.*/\1/p' "$RUNNER" | sort
+)
+
+# Targets that are intentionally not in either group (config-driven).
+CONFIG_ONLY=(grpc-server)
+
+echo "=== Drift guard: groups vs case dispatch ==="
+
+# Every group member must have a case-dispatch entry.
+for target in "${OFFLINE_TARGETS[@]}" "${LIVE_TARGETS[@]}"; do
+    if printf '%s\n' "${DISPATCH_TARGETS[@]}" | grep -qx "$target"; then
+        : # ok
+    else
+        fail "Group member '$target' has no case-dispatch entry in run-live-tests.sh"
+    fi
+done
+
+# Every dispatch target must be in a group or in CONFIG_ONLY.
+all_grouped=("${OFFLINE_TARGETS[@]}" "${LIVE_TARGETS[@]}" "${CONFIG_ONLY[@]}")
+for target in "${DISPATCH_TARGETS[@]}"; do
+    if printf '%s\n' "${all_grouped[@]}" | grep -qx "$target"; then
+        : # ok
+    else
+        fail "Dispatch target '$target' is not in OFFLINE_TARGETS, LIVE_TARGETS, or CONFIG_ONLY"
+    fi
+done
+
+# No target should appear in both groups.
+for target in "${OFFLINE_TARGETS[@]}"; do
+    if printf '%s\n' "${LIVE_TARGETS[@]}" | grep -qx "$target"; then
+        fail "'$target' appears in both OFFLINE_TARGETS and LIVE_TARGETS"
+    fi
+done
+
+group_count=$(( ${#OFFLINE_TARGETS[@]} + ${#LIVE_TARGETS[@]} ))
+dispatch_count=${#DISPATCH_TARGETS[@]}
+config_count=${#CONFIG_ONLY[@]}
+pass "Groups (${group_count}) + config-only (${config_count}) cover all dispatch targets (${dispatch_count})"
+
+echo ""
+echo "=== Target group construction ==="
+
+# --group all includes every group member without duplicates.
+all="$(join_targets "${LIVE_TARGETS[@]}"),$(join_targets "${OFFLINE_TARGETS[@]}")"
+dup_count=$(echo "$all" | tr ',' '\n' | sort | uniq -d | wc -l | tr -d ' ')
+if [[ "$dup_count" -eq 0 ]]; then
+    pass "--group all: no duplicates"
 else
-    fail "--group offline: expected 19 targets, got $offline_count"
+    fail "--group all: found $dup_count duplicate(s)"
 fi
 
-# Test 2: --group live produces exactly LIVE_TARGETS
-live="$(join_targets "${LIVE_TARGETS[@]}")"
-live_count=$(echo "$live" | tr ',' '\n' | wc -l | tr -d ' ')
-if [[ "$live_count" -eq 6 ]]; then
-    pass "--group live: 6 targets"
-else
-    fail "--group live: expected 6 targets, got $live_count"
-fi
-
-# Test 3: --group all (no TARGETS_SETUP) includes all 25 targets
-all="${live},${offline}"
-all_count=$(echo "$all" | tr ',' '\n' | wc -l | tr -d ' ')
-if [[ "$all_count" -eq 25 ]]; then
-    pass "--group all (no config): 25 targets"
-else
-    fail "--group all (no config): expected 25 targets, got $all_count"
-fi
-
-# Test 4: edge-cases and crawl-depth are always present in all mode
-if echo "$all" | grep -q 'edge-cases' && echo "$all" | grep -q 'crawl-depth'; then
-    pass "--group all includes edge-cases and crawl-depth"
-else
-    fail "--group all missing edge-cases or crawl-depth"
-fi
-
-# Test 5: --group all with TARGETS_SETUP deduplicates correctly
+# TARGETS_SETUP merge deduplicates correctly.
 TARGETS_SETUP="rest-api,soap-service,graphql-server,grpc-server,concat-spa"
 merged="${TARGETS_SETUP},${all}"
 deduped=$(echo "$merged" | tr ',' '\n' | awk '!s[$0]++' | paste -sd, -)
-deduped_count=$(echo "$deduped" | tr ',' '\n' | wc -l | tr -d ' ')
-if [[ "$deduped_count" -eq 26 ]]; then
-    pass "--group all with TARGETS_SETUP: 26 targets (25 + grpc-server)"
-else
-    fail "--group all with TARGETS_SETUP: expected 26 targets, got $deduped_count"
-fi
-
-# Test 6: grpc-server is present after TARGETS_SETUP merge
-if echo "$deduped" | grep -q 'grpc-server'; then
-    pass "TARGETS_SETUP adds grpc-server"
-else
-    fail "TARGETS_SETUP did not add grpc-server"
-fi
-
-# Test 7: no duplicates after dedup
 dup_count=$(echo "$deduped" | tr ',' '\n' | sort | uniq -d | wc -l | tr -d ' ')
 if [[ "$dup_count" -eq 0 ]]; then
-    pass "No duplicates after dedup"
+    pass "TARGETS_SETUP merge: no duplicates after dedup"
 else
-    fail "Found $dup_count duplicates after dedup"
+    fail "TARGETS_SETUP merge: found $dup_count duplicate(s)"
+fi
+
+# grpc-server is present after merge (config-only target works).
+if echo "$deduped" | grep -q 'grpc-server'; then
+    pass "TARGETS_SETUP merge: grpc-server included"
+else
+    fail "TARGETS_SETUP merge: grpc-server missing"
 fi
 
 echo ""
 echo "=== join_targets helper ==="
 
-# Test 8: join_targets produces comma-separated output
 arr=(a b c)
 result="$(join_targets "${arr[@]}")"
 if [[ "$result" == "a,b,c" ]]; then
@@ -93,7 +103,6 @@ else
     fail "join_targets: expected 'a,b,c', got '$result'"
 fi
 
-# Test 9: join_targets with single element
 result="$(join_targets "only")"
 if [[ "$result" == "only" ]]; then
     pass "join_targets single: 'only'"
@@ -104,13 +113,11 @@ fi
 echo ""
 echo "=== Argument validation ==="
 
-# Test 10: invalid --group value exits non-zero
-# We can't easily source main() without side effects, so invoke the script
-# with a dummy config to test the error path.
+# Invalid --group value exits non-zero.
 tmpconfig=$(mktemp)
 echo "TARGETS_SETUP=" > "$tmpconfig"
 if env CONFIG_FILE="$tmpconfig" bash -c "
-    source '$SCRIPT_DIR/run-live-tests.sh' --group bogus 2>/dev/null
+    source '$RUNNER' --group bogus 2>/dev/null
 " 2>/dev/null; then
     fail "Invalid --group should exit non-zero"
 else
