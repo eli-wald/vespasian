@@ -2773,7 +2773,9 @@ usage() {
     echo "  --group <name>        Run a predefined target group: offline, live, or all (default: all)"
     echo "  --targets <list>      Comma-separated targets to test (overrides --group)"
     echo "                        Valid targets:"
-    echo "                          Live:       rest-api, soap-service, graphql-server, grpc-server"
+    echo "                          Live:       rest-api, soap-service, graphql-server, concat-spa,"
+    echo "                                      edge-cases, crawl-depth"
+    echo "                          Config:     grpc-server (included via TARGETS_SETUP when set up)"
     echo "                          Generate:   generate-rest, generate-wsdl, generate-wsdl-matrix,"
     echo "                                      generate-graphql, generate-graphql-imports,"
     echo "                                      generate-js-static, generate-merge-slugs"
@@ -2805,10 +2807,12 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --group)
+                if [[ $# -lt 2 ]]; then log_fail "--group requires a value"; usage; exit 1; fi
                 group="$2"
                 shift 2
                 ;;
             --targets)
+                if [[ $# -lt 2 ]]; then log_fail "--targets requires a value"; usage; exit 1; fi
                 targets="$2"
                 shift 2
                 ;;
