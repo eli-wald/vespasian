@@ -138,16 +138,16 @@ const shutdownBackstop = 10 * time.Second
 func doCrawl(ctx context.Context, stderr io.Writer, targetURL string, opts crawl.CrawlerOptions) ([]crawl.ObservedRequest, error) {
 	opts.Stderr = stderr
 
-	if opts.Proxy != "" && !opts.Headless {
-		fmt.Fprintf(stderr, "warning: --proxy is only supported with headless browser mode; ignoring proxy setting\n") //nolint:errcheck // best-effort warning
-		opts.Proxy = ""
-	}
-
-	// Safety: opts.Proxy is printed below. All current callers (CrawlCmd.Run,
-	// ScanCmd.Run) validate via setupBrowserAndSignals → validateProxyAddr first,
-	// which rejects embedded credentials. If adding a new caller, ensure
-	// validateProxyAddr runs before reaching this point.
+	// --proxy is honored on both backends: the headless path routes Chrome via
+	// --proxy-server, the HTTP path routes the net/http transport (LAB-4011).
+	// Validate here BEFORE opts.Proxy is printed below so an invalid or
+	// credential-bearing address is rejected (and never logged). The backends
+	// re-validate (NewBrowserManager for headless, HTTPCrawler.Crawl for HTTP),
+	// so library/SDK callers are covered independently of this CLI check.
 	if opts.Proxy != "" {
+		if err := crawl.ValidateProxyAddr(opts.Proxy); err != nil {
+			return nil, err
+		}
 		if u, err := url.Parse(opts.Proxy); err == nil && u.Port() == "" {
 			fmt.Fprintf(stderr, "warning: --proxy address %q has no explicit port; most proxies require one (e.g., :8080)\n", opts.Proxy) //nolint:errcheck // best-effort warning
 		}
@@ -237,7 +237,8 @@ type CrawlOptions struct {
 	Timeout         time.Duration `default:"10m" help:"Maximum duration for the entire crawl"`
 	Scope           string        `default:"same-origin" enum:"same-origin,same-domain" help:"Crawl scope"`
 	Headless        bool          `default:"true" help:"Use headless browser"`
-	Proxy           string        `help:"Proxy address for headless browser (e.g., http://127.0.0.1:8080). Note: TLS certificate verification is disabled during crawls."`
+	Proxy           string        `help:"Proxy address for the crawl stage (e.g., http://127.0.0.1:8080); http/https/socks5. Routes crawl traffic through the proxy on both crawler backends: Chrome (headless) or the net/http transport (--headless=false). Probe and JS-replay traffic is not proxied. TLS verification stays on by default; use --proxy-insecure to accept an intercepting proxy's MITM certificate on the net/http backend. With --proxy the dial-time SSRF IP pin is skipped for the proxy connection; URL scope is still enforced, so private targets still require --dangerous-allow-private."`
+	ProxyInsecure   bool          `name:"proxy-insecure" help:"Disable TLS certificate verification for an http/https intercepting proxy (Burp/mitmproxy MITM) on the net/http backend (--headless=false). Off by default; no effect on socks5 or the headless backend (there, trust the proxy CA via the OS trust store instead)."`
 	Concurrency     int           `default:"10" help:"Number of concurrent browser tabs for headless crawling"`
 	NoRequestID     bool          `name:"no-request-id" help:"Disable automatic X-Vespasian-Request-Id header"`
 	Verbose         bool          `short:"v" help:"Enable verbose logging"`
@@ -368,14 +369,15 @@ func (c *CrawlCmd) Run() error {
 	}
 
 	bs, err := setupBrowserAndSignals(c.Header, c.CrawlOptions, crawl.CrawlerOptions{
-		Depth:        c.Depth,
-		MaxPages:     c.MaxPages,
-		Timeout:      c.Timeout,
-		Scope:        c.Scope,
-		Headless:     c.Headless,
-		Proxy:        c.Proxy,
-		Concurrency:  c.Concurrency,
-		AllowPrivate: c.DangerousAllowPrivate,
+		Depth:         c.Depth,
+		MaxPages:      c.MaxPages,
+		Timeout:       c.Timeout,
+		Scope:         c.Scope,
+		Headless:      c.Headless,
+		Proxy:         c.Proxy,
+		ProxyInsecure: c.ProxyInsecure,
+		Concurrency:   c.Concurrency,
+		AllowPrivate:  c.DangerousAllowPrivate,
 	})
 	if err != nil {
 		return err
@@ -461,16 +463,17 @@ func (c *ImportCmd) Run() error {
 
 // GenerateCmd generates API specifications from captured traffic.
 type GenerateCmd struct {
-	APIType               string  `arg:"" enum:"rest,wsdl,graphql" help:"API type to generate (rest, wsdl, graphql)"`
-	Capture               string  `arg:"" help:"Capture file path"`
-	Output                string  `short:"o" help:"Output file path"`
-	Confidence            float64 `default:"0.5" help:"Minimum confidence threshold"`
-	Probe                 bool    `default:"true" help:"Enable active probing of classified endpoints (OPTIONS/schema/WSDL-fetch/GraphQL introspection). Note: JS-bundle replay extraction runs only in 'scan', which has a live target URL to re-fetch bundles from; 'generate' works offline from an existing capture and cannot run it."`
-	Deduplicate           bool    `default:"true" help:"Deduplicate classified endpoints before probing"`
-	DangerousAllowPrivate bool    `help:"Disable SSRF protection on the probe path (OPTIONS/schema/WSDL-fetch/GraphQL introspection) for private/localhost targets. WARNING: Do not use on production systems." name:"dangerous-allow-private"`
-	Verbose               bool    `short:"v" help:"Enable verbose logging"`
-	AnalyzeJS             bool    `name:"analyze-js"       default:"true"  help:"Statically analyze JS bundles in the imported capture (when present)."`
-	FetchSourcemaps       bool    `name:"fetch-sourcemaps" default:"false" help:"When --analyze-js is set, fetch .js.map sourcemaps referenced via //# sourceMappingURL= comments. Default false on generate (offline-friendly)."`
+	APIType                string  `arg:"" enum:"rest,wsdl,graphql,grpc" help:"API type to generate (rest, wsdl, graphql, grpc)"`
+	Capture                string  `arg:"" help:"Capture file path"`
+	Output                 string  `short:"o" help:"Output file path"`
+	Confidence             float64 `default:"0.5" help:"Minimum confidence threshold"`
+	Probe                  bool    `default:"true" help:"Enable active probing of classified endpoints (OPTIONS/schema/WSDL-fetch/GraphQL introspection). Note: JS-bundle replay extraction runs only in 'scan', which has a live target URL to re-fetch bundles from; 'generate' works offline from an existing capture and cannot run it."`
+	Deduplicate            bool    `default:"true" help:"Deduplicate classified endpoints before probing"`
+	DangerousAllowPrivate  bool    `help:"Disable SSRF protection on the probe path (OPTIONS/schema/WSDL-fetch/GraphQL introspection) for private/localhost targets. WARNING: Do not use on production systems." name:"dangerous-allow-private"`
+	GRPCInsecureSkipVerify bool    `help:"Skip TLS certificate verification when probing gRPC server reflection over TLS (for self-signed/internal-CA targets). Default: verify." name:"grpc-insecure-skip-verify"`
+	Verbose                bool    `short:"v" help:"Enable verbose logging"`
+	AnalyzeJS              bool    `name:"analyze-js"       default:"true"  help:"Statically analyze JS bundles in the imported capture (when present)."`
+	FetchSourcemaps        bool    `name:"fetch-sourcemaps" default:"false" help:"When --analyze-js is set, fetch .js.map sourcemaps referenced via //# sourceMappingURL= comments. Default false on generate (offline-friendly)."`
 
 	SlugOptions
 }
@@ -530,14 +533,15 @@ func (c *GenerateCmd) Run() (err error) {
 	warnSSRFDisabled(c.DangerousAllowPrivate, c.Probe)
 
 	spec, err := pipeline.ClassifyProbeGenerate(ctx, requests, pipeline.Options{
-		APIType:       c.APIType,
-		Confidence:    c.Confidence,
-		Probe:         c.Probe,
-		Deduplicate:   c.Deduplicate,
-		AllowPrivate:  c.DangerousAllowPrivate,
-		MergeSlugs:    c.MergeSlugs,
-		SlugThreshold: c.SlugThreshold,
-		Status:        statusWriter(c.Verbose),
+		APIType:                c.APIType,
+		Confidence:             c.Confidence,
+		Probe:                  c.Probe,
+		Deduplicate:            c.Deduplicate,
+		AllowPrivate:           c.DangerousAllowPrivate,
+		GRPCInsecureSkipVerify: c.GRPCInsecureSkipVerify,
+		MergeSlugs:             c.MergeSlugs,
+		SlugThreshold:          c.SlugThreshold,
+		Status:                 statusWriter(c.Verbose),
 	})
 	if err != nil {
 		return err
@@ -551,12 +555,13 @@ func (c *GenerateCmd) Run() (err error) {
 
 // ScanCmd runs the full pipeline: crawl, classify, and generate.
 type ScanCmd struct {
-	URL                   string  `arg:"" help:"Target URL to scan"`
-	APIType               string  `default:"auto" enum:"auto,rest,wsdl,graphql" help:"API type to generate (auto detects from traffic)" name:"api-type"`
-	Confidence            float64 `default:"0.5" help:"Minimum confidence threshold"`
-	Probe                 bool    `default:"true" help:"Enable endpoint probing"`
-	Deduplicate           bool    `default:"true" help:"Deduplicate classified endpoints before probing"`
-	DangerousAllowPrivate bool    `help:"Disable SSRF protection for crawling and probes, allowing private/localhost targets (localhost, 127.0.0.1, RFC1918, link-local). Required when the seed URL is a private host, otherwise the crawl exits with an error and captures nothing. WARNING: Do not use on production systems." name:"dangerous-allow-private"`
+	URL                    string  `arg:"" help:"Target URL to scan"`
+	APIType                string  `default:"auto" enum:"auto,rest,wsdl,graphql,grpc" help:"API type to generate (auto detects from traffic; grpc requires explicit selection)" name:"api-type"`
+	Confidence             float64 `default:"0.5" help:"Minimum confidence threshold"`
+	Probe                  bool    `default:"true" help:"Enable endpoint probing"`
+	Deduplicate            bool    `default:"true" help:"Deduplicate classified endpoints before probing"`
+	DangerousAllowPrivate  bool    `help:"Disable SSRF protection for crawling and probes, allowing private/localhost targets (localhost, 127.0.0.1, RFC1918, link-local). Required when the seed URL is a private host, otherwise the crawl exits with an error and captures nothing. WARNING: Do not use on production systems." name:"dangerous-allow-private"`
+	GRPCInsecureSkipVerify bool    `help:"Skip TLS certificate verification when probing gRPC server reflection over TLS (for self-signed/internal-CA targets). Default: verify." name:"grpc-insecure-skip-verify"`
 
 	CrawlOptions
 	SlugOptions
@@ -573,14 +578,15 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	}
 
 	bs, err := setupBrowserAndSignals(c.Header, c.CrawlOptions, crawl.CrawlerOptions{
-		Depth:        c.Depth,
-		MaxPages:     c.MaxPages,
-		Timeout:      c.Timeout,
-		Scope:        c.Scope,
-		Headless:     c.Headless,
-		Proxy:        c.Proxy,
-		Concurrency:  c.Concurrency,
-		AllowPrivate: c.DangerousAllowPrivate,
+		Depth:         c.Depth,
+		MaxPages:      c.MaxPages,
+		Timeout:       c.Timeout,
+		Scope:         c.Scope,
+		Headless:      c.Headless,
+		Proxy:         c.Proxy,
+		ProxyInsecure: c.ProxyInsecure,
+		Concurrency:   c.Concurrency,
+		AllowPrivate:  c.DangerousAllowPrivate,
 	})
 	if err != nil {
 		return err
@@ -654,15 +660,16 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 	// rescan) and c.Probe (so --probe=false stays passive — see
 	// maybeReplayJSExtracted), and is CLI-only (the SDK passes a nil AfterWSDL hook).
 	spec, apiType, foundWSDL, _, err := pipeline.ResolveAndGenerate(genCtx, requests, pipeline.ScanOptions{
-		TargetURL:     c.URL,
-		APIType:       apiType,
-		Confidence:    c.Confidence,
-		Probe:         c.Probe,
-		Deduplicate:   c.Deduplicate,
-		AllowPrivate:  c.DangerousAllowPrivate,
-		MergeSlugs:    c.MergeSlugs,
-		SlugThreshold: c.SlugThreshold,
-		Status:        statusWriter(c.Verbose),
+		TargetURL:              c.URL,
+		APIType:                apiType,
+		Confidence:             c.Confidence,
+		Probe:                  c.Probe,
+		Deduplicate:            c.Deduplicate,
+		AllowPrivate:           c.DangerousAllowPrivate,
+		GRPCInsecureSkipVerify: c.GRPCInsecureSkipVerify,
+		MergeSlugs:             c.MergeSlugs,
+		SlugThreshold:          c.SlugThreshold,
+		Status:                 statusWriter(c.Verbose),
 		AfterWSDL: func(ctx context.Context, reqs []crawl.ObservedRequest) []crawl.ObservedRequest {
 			return maybeReplayJSExtracted(ctx, reqs, c.Probe && c.AnalyzeJS, crawl.JSReplayConfig{
 				Headers:      bs.opts.Headers,
@@ -747,6 +754,8 @@ func apiTypeDisplayName(apiType string) string {
 		return "WSDL"
 	case pipeline.APITypeGraphQL:
 		return "GraphQL"
+	case pipeline.APITypeGRPC:
+		return "gRPC"
 	default:
 		return apiType
 	}

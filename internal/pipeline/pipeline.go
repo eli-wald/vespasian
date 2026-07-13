@@ -18,8 +18,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"time"
 
 	"github.com/praetorian-inc/vespasian/pkg/classify"
 	"github.com/praetorian-inc/vespasian/pkg/crawl"
@@ -29,7 +29,7 @@ import (
 
 // Options configures ClassifyProbeGenerate.
 type Options struct {
-	// APIType is one of APITypeREST, APITypeWSDL, APITypeGraphQL.
+	// APIType is one of APITypeREST, APITypeWSDL, APITypeGraphQL, APITypeGRPC.
 	APIType string
 
 	// Confidence is the classifier match threshold (0.0-1.0).
@@ -43,6 +43,11 @@ type Options struct {
 
 	// AllowPrivate disables SSRF protection on probes (allow private/internal IPs).
 	AllowPrivate bool
+
+	// GRPCInsecureSkipVerify skips TLS certificate verification when probing
+	// gRPC server reflection over TLS (for self-signed/internal-CA targets).
+	// SSRF protection is still enforced by the dialer regardless.
+	GRPCInsecureSkipVerify bool
 
 	// MergeSlugs enables observation-based slug merging in REST path
 	// normalization. Ignored by the wsdl/graphql generators.
@@ -98,18 +103,39 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 
 	if opts.Probe {
 		cfg := probe.DefaultConfig()
+		cfg.GRPCInsecureSkipVerify = opts.GRPCInsecureSkipVerify
 		if opts.AllowPrivate {
+			// allow-private disables ONLY SSRF protection (URLValidator +
+			// DialContext re-resolution). Clone probe's default transport and
+			// override just DialContext with a plain net.Dialer so every other
+			// default (TLS/idle timeouts, and any future proxy/CA settings) is
+			// preserved rather than dropped by a hand-rolled bare transport. The
+			// client otherwise mirrors probe's default client (CheckRedirect only).
 			cfg.URLValidator = func(string) error { return nil }
+			transport := probe.DefaultTransport()
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			}
 			cfg.Client = &http.Client{
-				Timeout: 15 * time.Second,
 				CheckRedirect: func(req *http.Request, via []*http.Request) error {
 					return http.ErrUseLastResponse
 				},
-				Transport: &http.Transport{
-					TLSHandshakeTimeout:   10 * time.Second,
-					ResponseHeaderTimeout: 10 * time.Second,
-				},
+				Transport: transport,
 			}
+			cfg.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			}
+		}
+		// Pure grpc-gateway traffic is REST/JSON, so the gRPC classifier never
+		// marks it APIType=="grpc" and the gRPC/gateway probes (which only
+		// iterate grpc endpoints) get no targets. Seed one synthetic grpc
+		// endpoint per distinct host so reflection and the gateway probe have
+		// something to reach. SSRF protection still applies via the probes'
+		// URLValidator/Dialer.
+		if opts.APIType == APITypeGRPC {
+			classified = seedGRPCHostEndpoints(requests, classified, probe.DefaultMaxEndpoints)
 		}
 		strategies := StrategiesForType(opts.APIType, cfg)
 		enriched, probeErrs := probe.RunStrategies(ctx, strategies, classified)
@@ -117,6 +143,17 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 			writeStatus(opts.Status, "probe warning: %v\n", e)
 		}
 		classified = enriched
+	}
+
+	// Lowest-priority gRPC-Web JS binding recovery from the capture. This is a
+	// static pass over the captured JS bodies (no network), so it runs for
+	// --api-type grpc whether or not probing was enabled. When probing ran,
+	// classified holds the probed result and bindings fill only the endpoints
+	// reflection/gateway did not cover; reflection results are never
+	// overwritten (reflection > gateway > bindings). When probing did not run,
+	// classified holds the raw classified set and bindings enrich that.
+	if opts.APIType == APITypeGRPC {
+		classified = enrichGRPCFromBindings(requests, classified, opts.Status)
 	}
 
 	gen, err := generate.GetWithOptions(opts.APIType, generate.Options{

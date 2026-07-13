@@ -99,6 +99,26 @@ preflight_test_host() {
             ;;
     esac
     case ",${targets}," in
+        *,grpc-server,*)
+            local grpc_port="${GRPC_SERVER_PORT:-}"
+            if [ -n "$grpc_port" ]; then
+                if command -v grpcurl >/dev/null 2>&1; then
+                    if grpcurl -plaintext "${TEST_HOST}:${grpc_port}" list >/dev/null 2>&1; then
+                        log_ok "grpc-server reachable at ${TEST_HOST}:${grpc_port}"
+                    else
+                        log_fail "grpc-server is unreachable at ${TEST_HOST}:${grpc_port}"
+                        failed=1
+                    fi
+                elif nc -z "${TEST_HOST}" "${grpc_port}" 2>/dev/null; then
+                    log_ok "grpc-server reachable at ${TEST_HOST}:${grpc_port} (nc)"
+                elif (echo >/dev/tcp/"${TEST_HOST}"/"${grpc_port}") 2>/dev/null; then
+                    log_ok "grpc-server reachable at ${TEST_HOST}:${grpc_port} (/dev/tcp)"
+                else
+                    log_fail "grpc-server is unreachable at ${TEST_HOST}:${grpc_port}"
+                    failed=1
+                fi
+            fi
+            ;;
         *,concat-spa,*)
             _probe_target_host "${CONCAT_SPA_PORT:-}" "/healthz" "concat-spa" || failed=1
             ;;
@@ -531,6 +551,158 @@ PYEOF
     else
         set_test_result "soap-service" "FAIL" "?" "$expected_count" "$duration"
         log_fail "soap-service: ${failures} check(s) failed (${duration}s)"
+    fi
+}
+
+test_grpc_server() {
+    local port="${GRPC_SERVER_PORT:-50051}"
+    local base_url="http://${TEST_HOST}:${port}"
+    local target_dir="${RESULTS_DIR}/grpc-server"
+    local spec_file="${target_dir}/spec.proto"
+    local expected="${SCRIPT_DIR}/grpc-server/expected-paths.json"
+    local verbose_flag=""
+
+    [ "${VERBOSE:-false}" = true ] && verbose_flag="-v"
+
+    mkdir -p "$target_dir"
+    init_test_status "grpc-server"
+
+    local start=$SECONDS
+    local failures=0
+
+    log_header "Testing: grpc-server (${base_url})"
+
+    # Build a minimal synthetic capture so the classifier tags the request as
+    # gRPC and the reflection probe dials the correct host:port.
+    local capture_file="${target_dir}/capture.json"
+    cat > "$capture_file" << EOF
+[
+  {
+    "method": "POST",
+    "url": "${base_url}/lab.v1.UserService/GetUser",
+    "headers": { "content-type": "application/grpc" },
+    "response": { "status_code": 0, "content_type": "application/grpc" }
+  }
+]
+EOF
+
+    # Run generate grpc — vespasian classifies the capture, runs reflection,
+    # and writes a proto3 .proto file.
+    log_info "Generating gRPC .proto via reflection at ${base_url}..."
+    if ! "$VESPASIAN" generate grpc "$capture_file" \
+        --dangerous-allow-private \
+        -o "$spec_file" \
+        ${verbose_flag:+"$verbose_flag"} 2>&1; then
+        log_fail "gRPC reflection generate failed"
+        set_test_result "grpc-server" "FAIL" "?" "?" "$((SECONDS - start))"
+        return 1
+    fi
+
+    # Validate spec file exists and is non-empty
+    if [ ! -s "$spec_file" ]; then
+        log_fail "Proto spec file missing or empty: ${spec_file}"
+        set_test_result "grpc-server" "FAIL" "?" "?" "$((SECONDS - start))"
+        return 1
+    fi
+    log_ok "Proto spec written: ${spec_file}"
+
+    # Validate expected services and methods are present
+    local validation_result rc=0
+    validation_result=$(python3 - "$spec_file" "$expected" << 'PYEOF'
+import json, sys, re
+
+spec_path = sys.argv[1]
+expected_path = sys.argv[2]
+
+with open(spec_path) as f:
+    spec = f.read()
+
+with open(expected_path) as f:
+    expected = json.load(f)
+
+errors = []
+
+def service_body(short_name):
+    # Service bodies contain only rpc declarations (no nested braces), so a
+    # match to the next closing brace isolates one service block.
+    m = re.search(r'service\s+' + re.escape(short_name) + r'\s*\{(?P<body>[^}]*)\}', spec)
+    return m.group("body") if m else None
+
+# Check each expected service by short name (vespasian renders short names, not
+# FQNs) and scope RPC matching to that service's body, so a method declared
+# under a different service cannot satisfy the check.
+for fqn, methods in expected["services"].items():
+    short_name = fqn.split(".")[-1]
+    body = service_body(short_name)
+    if body is None:
+        errors.append("Missing service: %s (short name: %s)" % (fqn, short_name))
+        continue
+    for method in methods:
+        if not re.search(r'\brpc\s+' + re.escape(method) + r'\s*\(', body):
+            errors.append("Missing rpc: %s in %s" % (method, short_name))
+
+# Validate server-streaming methods keep their `stream` return marker so a
+# streaming->unary regression is caught.
+for full in expected.get("streaming_methods", []):
+    svc_fqn, method = full.split("/", 1)
+    short_name = svc_fqn.split(".")[-1]
+    body = service_body(short_name)
+    if body is None:
+        errors.append("Missing service for streaming check: %s" % svc_fqn)
+        continue
+    stream_re = r'\brpc\s+' + re.escape(method) + r'\s*\([^)]*\)\s+returns\s*\(\s*stream\b'
+    if not re.search(stream_re, body, flags=re.S):
+        errors.append("Missing server-streaming rpc signature: %s" % full)
+
+if errors:
+    for e in errors:
+        print("FAIL: " + e)
+    sys.exit(1)
+
+total_services = expected["total_services"]
+print("OK: found %d services with all expected methods" % total_services)
+PYEOF
+    ) || rc=$?
+
+    if [ $rc -ne 0 ]; then
+        log_fail "Proto validation failed:"
+        echo "$validation_result" >&2
+        failures=$((failures + 1))
+    else
+        log_ok "Proto validation: $validation_result"
+    fi
+
+    # AC4 (LAB-2778): prove the emitted .proto actually compiles with protoc,
+    # not just that it matches the expected service/method shapes textually.
+    if command -v protoc >/dev/null 2>&1; then
+        if grep -q '^// ---$' "$spec_file"; then
+            # renderProto concatenates multiple reflection files into one output
+            # separated by "// ---"; protoc cannot compile a multi-file blob from a
+            # single input. The lab target emits a single file, so this branch is
+            # only a guard for future multi-file targets.
+            log_info "Skipping protoc compile: emitted spec is multi-file (concatenated)"
+        elif protoc --proto_path="$target_dir" --descriptor_set_out=/dev/null \
+            "$(basename "$spec_file")" 2>/tmp/protoc-grpc.err; then
+            log_ok "protoc compiled emitted .proto successfully"
+        else
+            log_fail "protoc failed to compile emitted .proto:"
+            cat /tmp/protoc-grpc.err >&2
+            failures=$((failures + 1))
+        fi
+    else
+        log_info "protoc not installed — skipping .proto compile check (AC4)"
+    fi
+
+    local expected_count
+    expected_count=$(json_field "$expected" total_services)
+
+    local duration=$((SECONDS - start))
+    if [ $failures -eq 0 ]; then
+        set_test_result "grpc-server" "PASS" "$expected_count" "$expected_count" "$duration"
+        log_ok "grpc-server: ALL CHECKS PASSED (${duration}s)"
+    else
+        set_test_result "grpc-server" "FAIL" "?" "$expected_count" "$duration"
+        log_fail "grpc-server: ${failures} check(s) failed (${duration}s)"
     fi
 }
 
@@ -2560,7 +2732,7 @@ usage() {
     echo "Options:"
     echo "  --targets <list>      Comma-separated targets to test (default: all)"
     echo "                        Valid targets:"
-    echo "                          Live:       rest-api, soap-service, graphql-server"
+    echo "                          Live:       rest-api, soap-service, graphql-server, grpc-server"
     echo "                          Generate:   generate-rest, generate-wsdl, generate-wsdl-matrix,"
     echo "                                      generate-graphql, generate-graphql-imports,"
     echo "                                      generate-js-static, generate-merge-slugs"
@@ -2625,7 +2797,7 @@ main() {
 
     # Default targets from config
     if [ -z "$targets" ]; then
-        targets="${TARGETS_SETUP:-rest-api,soap-service,graphql-server,concat-spa}"
+        targets="${TARGETS_SETUP:-rest-api,soap-service,graphql-server,grpc-server,concat-spa}"
         # Always include importer tests
         targets="${targets},import-burp,import-har,import-base64,import-mitmproxy,import-mitmproxy-native,import-unicode,import-duplicates,import-malformed,import-empty"
         targets="${targets},generate-rest,generate-wsdl,generate-wsdl-matrix,generate-graphql,generate-graphql-imports,generate-js-static,generate-merge-slugs"
@@ -2661,6 +2833,7 @@ main() {
             rest-api)      test_rest_api ;;
             soap-service)    test_soap_service ;;
             graphql-server)  test_graphql_server ;;
+            grpc-server)     test_grpc_server ;;
             concat-spa)      test_concat_spa ;;
             import-burp)        test_import_burp ;;
             import-har)         test_import_har ;;

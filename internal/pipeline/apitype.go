@@ -26,6 +26,7 @@ const (
 	APITypeREST    = "rest"
 	APITypeWSDL    = "wsdl"
 	APITypeGraphQL = "graphql"
+	APITypeGRPC    = "grpc"
 )
 
 // DetectAPIType runs lightweight classification against all three API types and
@@ -77,6 +78,8 @@ func ClassifiersForType(apiType string) []classify.APIClassifier {
 		return []classify.APIClassifier{&classify.WSDLClassifier{}}
 	case APITypeGraphQL:
 		return []classify.APIClassifier{&classify.GraphQLClassifier{}}
+	case APITypeGRPC:
+		return []classify.APIClassifier{&classify.GRPCClassifier{}}
 	default:
 		return nil
 	}
@@ -84,13 +87,21 @@ func ClassifiersForType(apiType string) []classify.APIClassifier {
 
 // StrategiesForType returns the probe strategies for the given API type.
 // REST (and the default) get OPTIONS + Schema probes; WSDL gets WSDL probe;
-// GraphQL gets GraphQL probe.
+// GraphQL gets GraphQL probe. The gRPC path chains reflection (richest — real
+// message fields) then the grpc-gateway OpenAPI probe (names only) in priority
+// order; gRPC-Web JS bindings are applied separately by enrichGRPCFromBindings
+// since they read the capture rather than the network.
 func StrategiesForType(apiType string, cfg probe.Config) []probe.ProbeStrategy {
 	switch apiType {
 	case APITypeWSDL:
 		return []probe.ProbeStrategy{probe.NewWSDLProbe(cfg)}
 	case APITypeGraphQL:
 		return []probe.ProbeStrategy{probe.NewGraphQLProbe(cfg)}
+	case APITypeGRPC:
+		return []probe.ProbeStrategy{
+			probe.NewGRPCProbe(cfg),
+			probe.NewGRPCGatewayProbe(cfg),
+		}
 	default:
 		return []probe.ProbeStrategy{
 			probe.NewOptionsProbe(cfg),

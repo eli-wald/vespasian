@@ -20,6 +20,8 @@
 //   - [rest]: OpenAPI 3.0 (YAML) from REST traffic
 //   - [graphql]: GraphQL SDL from introspection or traffic inference
 //   - [wsdl]: WSDL XML from SOAP traffic
+//   - [grpc]: proto3 .proto files from gRPC server reflection (requires
+//     reflection-derived FileDescriptors; no traffic-only inference path)
 //
 // Use [Get] to retrieve a generator by API type name, or [GetWithOptions] to
 // pass [Options] (e.g. REST slug-merging configuration) to the generator.

@@ -42,6 +42,10 @@ type ScanOptions struct {
 	// AllowPrivate disables SSRF protection on probes (allow private/internal IPs).
 	AllowPrivate bool
 
+	// GRPCInsecureSkipVerify skips TLS certificate verification when probing
+	// gRPC server reflection over TLS. Forwarded to ClassifyProbeGenerate.
+	GRPCInsecureSkipVerify bool
+
 	// MergeSlugs enables observation-based slug merging in REST path
 	// normalization. Ignored by the wsdl/graphql generators.
 	MergeSlugs bool
@@ -87,14 +91,15 @@ func ResolveAndGenerate(ctx context.Context, requests []crawl.ObservedRequest, o
 	}
 
 	spec, err = ClassifyProbeGenerate(ctx, requests, Options{
-		APIType:       apiType,
-		Confidence:    opts.Confidence,
-		Probe:         opts.Probe,
-		Deduplicate:   opts.Deduplicate,
-		AllowPrivate:  opts.AllowPrivate,
-		MergeSlugs:    opts.MergeSlugs,
-		SlugThreshold: opts.SlugThreshold,
-		Status:        opts.Status,
+		APIType:                apiType,
+		Confidence:             opts.Confidence,
+		Probe:                  opts.Probe,
+		Deduplicate:            opts.Deduplicate,
+		AllowPrivate:           opts.AllowPrivate,
+		GRPCInsecureSkipVerify: opts.GRPCInsecureSkipVerify,
+		MergeSlugs:             opts.MergeSlugs,
+		SlugThreshold:          opts.SlugThreshold,
+		Status:                 opts.Status,
 	})
 	return spec, apiType, foundWSDL, requests, err
 }
