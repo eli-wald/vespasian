@@ -30,6 +30,7 @@ mapfile -t DISPATCH_TARGETS < <(
 CONFIG_ONLY=(grpc-server)
 
 echo "=== Drift guard: groups vs case dispatch ==="
+drift_fail_before=$FAIL
 
 # Every group member must have a case-dispatch entry.
 for target in "${OFFLINE_TARGETS[@]}" "${LIVE_TARGETS[@]}"; do
@@ -60,7 +61,9 @@ done
 group_count=$(( ${#OFFLINE_TARGETS[@]} + ${#LIVE_TARGETS[@]} ))
 dispatch_count=${#DISPATCH_TARGETS[@]}
 config_count=${#CONFIG_ONLY[@]}
-pass "Groups (${group_count}) + config-only (${config_count}) cover all dispatch targets (${dispatch_count})"
+if [[ "$FAIL" -eq "$drift_fail_before" ]]; then
+    pass "Groups (${group_count}) + config-only (${config_count}) cover all dispatch targets (${dispatch_count})"
+fi
 
 echo ""
 echo "=== Target group construction ==="
@@ -146,15 +149,16 @@ else
 fi
 rm -f "$tmpconfig"
 
-# --targets overrides --group: when both are set, targets wins.
-# We verify this by checking the runner's implementation: targets is parsed
-# before group, and group resolution is skipped when targets is non-empty.
-# Structural test: grep for the guard that enforces this.
-if grep -q 'if \[ -z "\$targets" \]' "$RUNNER"; then
-    pass "--targets overrides --group: guard present (if [ -z \"\$targets\" ])"
+# --targets overrides --group: passing both should resolve only the --targets value.
+tmpconfig=$(mktemp)
+echo "TARGETS_SETUP=" > "$tmpconfig"
+override_output=$(env CONFIG_FILE="$tmpconfig" bash -c "source '$RUNNER' --targets smoke-check --group offline --no-build --no-start" 2>&1 || true)
+if [[ "$override_output" == *"smoke-check"* ]] && [[ "$override_output" != *"import-burp"* ]]; then
+    pass "--targets overrides --group: only smoke-check resolved, not offline group"
 else
-    fail "--targets overrides --group: guard missing from runner"
+    fail "--targets overrides --group: expected only smoke-check, got unexpected targets"
 fi
+rm -f "$tmpconfig"
 
 echo ""
 echo "=== Summary ==="
