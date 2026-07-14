@@ -2793,6 +2793,7 @@ usage() {
     echo ""
     echo "Examples:"
     echo "  $0                                    # Run all tests"
+    echo "  $0 --group offline --no-build          # Only offline targets, skip build"
     echo "  $0 --targets rest-api                 # Only test rest-api"
     echo "  $0 --targets import-burp,import-har   # Only run importer tests"
     echo "  $0 --verbose --no-build               # Verbose output, skip build"
