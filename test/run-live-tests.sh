@@ -13,6 +13,7 @@
 #   --verbose             Enable verbose vespasian output
 #   --no-build            Skip building vespasian and target binaries
 #   --no-start            Don't start/stop services (assume already running)
+#   --dry-run             Print resolved target list and exit (no build/test)
 #   --help                Show this help message
 
 set -euo pipefail
@@ -2787,6 +2788,7 @@ usage() {
     echo "  --verbose             Enable verbose vespasian output"
     echo "  --no-build            Skip building vespasian and target binaries"
     echo "  --no-start            Don't start/stop services (assume already running)"
+    echo "  --dry-run             Print resolved target list and exit (no build/test)"
     echo "  --help                Show this help message"
     echo ""
     echo "Examples:"

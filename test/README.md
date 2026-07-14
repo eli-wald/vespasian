@@ -112,6 +112,7 @@ Options:
   --verbose             Enable verbose vespasian output
   --no-build            Skip building vespasian and target binaries
   --no-start            Don't start/stop services (assume already running)
+  --dry-run             Print resolved target list and exit (no build/test)
   --help                Show this help message
 ```
 

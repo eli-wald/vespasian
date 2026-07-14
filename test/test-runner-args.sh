@@ -98,25 +98,25 @@ else
     fail "--group all: found $dup_count duplicate(s)"
 fi
 
-# TARGETS_SETUP merge deduplicates correctly (scoped to avoid leaking).
-(
-    TARGETS_SETUP="rest-api,soap-service,graphql-server,grpc-server,concat-spa"
-    merged="${TARGETS_SETUP},${all}"
-    deduped=$(echo "$merged" | tr ',' '\n' | awk '!s[$0]++' | paste -sd, -)
-    dup_count=$(echo "$deduped" | tr ',' '\n' | sort | uniq -d | wc -l | tr -d ' ')
-    if [[ "$dup_count" -eq 0 ]]; then
-        echo "  PASS: TARGETS_SETUP merge: no duplicates after dedup"
-    else
-        echo "  FAIL: TARGETS_SETUP merge: found $dup_count duplicate(s)" >&2
-        exit 1
-    fi
-    if echo "$deduped" | grep -q 'grpc-server'; then
-        echo "  PASS: TARGETS_SETUP merge: grpc-server included"
-    else
-        echo "  FAIL: TARGETS_SETUP merge: grpc-server missing" >&2
-        exit 1
-    fi
-) && PASS=$((PASS + 2)) || FAIL=$((FAIL + 1))
+# TARGETS_SETUP merge deduplicates correctly (behavioral via --dry-run).
+tmpconfig_setup=$(mktemp)
+echo "TARGETS_SETUP=grpc-server,rest-api" > "$tmpconfig_setup"
+setup_output=$(env CONFIG_FILE="$tmpconfig_setup" bash -c "source '$RUNNER' --group all --dry-run" 2>&1 | grep '^targets=' | sed 's/^targets=//')
+rm -f "$tmpconfig_setup"
+
+grpc_count=$(echo "$setup_output" | tr ',' '\n' | grep -cx 'grpc-server')
+if [[ "$grpc_count" -eq 1 ]]; then
+    pass "TARGETS_SETUP merge: grpc-server appears exactly once"
+else
+    fail "TARGETS_SETUP merge: grpc-server count=$grpc_count, expected 1"
+fi
+
+rest_count=$(echo "$setup_output" | tr ',' '\n' | grep -cx 'rest-api')
+if [[ "$rest_count" -eq 1 ]]; then
+    pass "TARGETS_SETUP merge: rest-api deduplicated (appears once)"
+else
+    fail "TARGETS_SETUP merge: rest-api count=$rest_count, expected 1"
+fi
 
 echo ""
 echo "=== join_targets helper ==="
