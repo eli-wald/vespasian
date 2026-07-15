@@ -2887,8 +2887,16 @@ main() {
 
     log_header "Vespasian Live Test Runner"
 
-    # Load config
-    load_config
+    # Load config only when it is actually needed. A real run always needs it
+    # (TEST_HOST and service ports for preflight and the tests). A --dry-run
+    # needs it only to resolve the "all" group, whose config-driven
+    # TARGETS_SETUP folds in config-only targets like grpc-server. The offline
+    # and live groups — and an explicit --targets list — resolve purely from the
+    # in-script arrays, so requiring a config there would make --dry-run fail on
+    # a fresh checkout for no reason.
+    if [ "$dry_run" != true ] || { [ -z "$targets" ] && [ "${group:-all}" = all ]; }; then
+        load_config
+    fi
 
     # --targets takes precedence over --group; --group defaults to "all".
     if [ -z "$targets" ]; then

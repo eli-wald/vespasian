@@ -298,6 +298,49 @@ fi
 rm -f "$tmpconfig"
 
 echo ""
+echo "=== --dry-run needs no config for offline/live/--targets ==="
+
+# offline/live resolution reads only OFFLINE_TARGETS/LIVE_TARGETS — never the
+# config — so --dry-run for those groups (and for an explicit --targets list)
+# must succeed on a fresh checkout with no .live-test-config. Point CONFIG_FILE
+# at a path that does not exist to prove the runner does not require it.
+noconfig="$SCRIPT_DIR/.nonexistent-live-test-config.$$"
+rm -f "$noconfig" 2>/dev/null || true
+
+nc_offline=$(env CONFIG_FILE="$noconfig" bash -c "source '$RUNNER' --group offline --dry-run" 2>&1) && nc_rc=0 || nc_rc=$?
+nc_offline_targets=$(printf '%s\n' "$nc_offline" | sed -n 's/^targets=//p')
+if [[ "$nc_rc" -eq 0 && "$nc_offline_targets" == "$(join_targets "${OFFLINE_TARGETS[@]}")" ]]; then
+    pass "--group offline --dry-run: succeeds without a config file"
+else
+    fail "--group offline --dry-run (no config): rc=$nc_rc, targets='$nc_offline_targets'"
+fi
+
+nc_live=$(env CONFIG_FILE="$noconfig" bash -c "source '$RUNNER' --group live --dry-run" 2>&1) && nc_rc=0 || nc_rc=$?
+nc_live_targets=$(printf '%s\n' "$nc_live" | sed -n 's/^targets=//p')
+if [[ "$nc_rc" -eq 0 && "$nc_live_targets" == "$(join_targets "${LIVE_TARGETS[@]}")" ]]; then
+    pass "--group live --dry-run: succeeds without a config file"
+else
+    fail "--group live --dry-run (no config): rc=$nc_rc, targets='$nc_live_targets'"
+fi
+
+nc_explicit=$(env CONFIG_FILE="$noconfig" bash -c "source '$RUNNER' --targets rest-api --dry-run" 2>&1) && nc_rc=0 || nc_rc=$?
+nc_explicit_targets=$(printf '%s\n' "$nc_explicit" | sed -n 's/^targets=//p')
+if [[ "$nc_rc" -eq 0 && "$nc_explicit_targets" == "rest-api" ]]; then
+    pass "--targets --dry-run: succeeds without a config file"
+else
+    fail "--targets --dry-run (no config): rc=$nc_rc, targets='$nc_explicit_targets'"
+fi
+
+# The default 'all' group folds in config-driven TARGETS_SETUP, so it still
+# requires a config even under --dry-run. Pin that this remains intentional.
+nc_all=$(env CONFIG_FILE="$noconfig" bash -c "source '$RUNNER' --group all --dry-run" 2>&1) && nc_rc=0 || nc_rc=$?
+if [[ "$nc_rc" -ne 0 && "$nc_all" == *"Config file not found"* ]]; then
+    pass "--group all --dry-run: still requires config (TARGETS_SETUP is config-driven)"
+else
+    fail "--group all --dry-run (no config): expected non-zero + 'Config file not found', rc=$nc_rc"
+fi
+
+echo ""
 echo "=== Summary ==="
 echo "  $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
