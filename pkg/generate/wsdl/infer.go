@@ -217,7 +217,7 @@ func extractNameFromURI(uri string) string {
 	uri = strings.Trim(uri, `"`)
 	// Handle URN-style: urn:GetUser -> GetUser
 	if strings.HasPrefix(uri, "urn:") {
-		return uri[4:]
+		return uri[5:]
 	}
 	// Handle fragment: http://example.com/ws#GetUser -> GetUser
 	if idx := strings.LastIndex(uri, "#"); idx >= 0 && idx < len(uri)-1 {
