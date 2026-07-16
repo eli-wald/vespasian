@@ -427,7 +427,7 @@ var servicePrefixPattern = regexp.MustCompile(
 var concatMethodPattern = regexp.MustCompile(
 	`["']` +
 		`(/?[a-zA-Z0-9/_{}.:?=&%~-]+)` +
-		`["']\.concat\(`,
+		`["']\.join\(`,
 )
 
 // concatPlusHeadPattern matches the head of a `+`-concat chain whose first
