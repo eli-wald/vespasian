@@ -39,7 +39,7 @@ var (
 	// uuidRegex matches UUIDs in paths (8-4-4-4-12 format).
 	uuidRegex = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	// numericRegex matches purely numeric segments.
-	numericRegex = regexp.MustCompile(`^[0-9]+$`)
+	numericRegex = regexp.MustCompile(`^[0-9]{4,}$`)
 	// objectIDRegex matches MongoDB ObjectIDs: exactly 24 hex characters.
 	// Hex strings of intermediate length (13-23 characters) are intentionally
 	// not classified as a parameter kind by the regex pass — they are
