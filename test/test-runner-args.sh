@@ -219,7 +219,9 @@ tmpconfig_all=$(new_tmp)
 echo "TARGETS_SETUP=" > "$tmpconfig_all"
 all=$(env CONFIG_FILE="$tmpconfig_all" bash -c "source '$RUNNER' --group all --dry-run" 2>&1 | grep '^targets=' | sed 's/^targets=//') || true
 dup_count=$(echo "$all" | tr ',' '\n' | sort | uniq -d | wc -l | tr -d ' ')
-if [[ "$dup_count" -eq 0 ]]; then
+if [[ -z "$all" ]]; then
+    fail "--group all: runner produced no target list (empty output)"
+elif [[ "$dup_count" -eq 0 ]]; then
     pass "--group all: no duplicates"
 else
     fail "--group all: found $dup_count duplicate(s)"
