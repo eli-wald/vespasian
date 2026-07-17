@@ -71,6 +71,7 @@ LIVE_TARGETS=(
     concat-spa
     edge-cases
     crawl-depth
+    forms-target
 )
 
 # join_targets prints array elements as a comma-separated string.
@@ -130,7 +131,7 @@ load_config() {
     # (rather than any KEY=VALUE) ensures a crafted or hand-edited config can
     # never rebind security-relevant globals such as VESPASIAN, PATH,
     # RESULTS_DIR, or TEST_HOST.
-    local allowed_keys=" REST_API_PORT SOAP_SERVICE_PORT GRAPHQL_SERVER_PORT GRPC_SERVER_PORT CONCAT_SPA_PORT TARGETS_SETUP "
+    local allowed_keys=" REST_API_PORT SOAP_SERVICE_PORT GRAPHQL_SERVER_PORT GRPC_SERVER_PORT CONCAT_SPA_PORT FORMS_TARGET_PORT TARGETS_SETUP "
 
     # Safety: only allow safe KEY=VALUE lines
     while IFS= read -r line; do
@@ -213,6 +214,11 @@ preflight_test_host() {
             ;;
         *,concat-spa,*)
             _probe_target_host "${CONCAT_SPA_PORT:-}" "/healthz" "concat-spa" || failed=1
+            ;;
+    esac
+    case ",${targets}," in
+        *,forms-target,*)
+            _probe_target_host "${FORMS_TARGET_PORT:-}" "/healthz" "forms-target" || failed=1
             ;;
     esac
     [ $failed -eq 0 ] && return 0
@@ -499,6 +505,179 @@ test_concat_spa() {
     else
         set_test_result "concat-spa" "FAIL" "$endpoint_count" "$expected_count" "$duration"
         log_fail "concat-spa: ${failures} check(s) failed (${duration}s)"
+    fi
+}
+
+# assert_form_query_params verifies the GET <form>'s query parameters were
+# extracted and merged onto the form's action endpoint in the generated spec.
+# A GET form contributes OpenAPI query parameters (rendered as "- name: <p>"),
+# unlike a urlencoded POST form whose request-body schema the REST generator
+# does not yet infer (deferred companion ticket to LAB-2109). Reads
+# form_query_params_path + form_query_params from expected-paths.json. Returns
+# 0 if the action path is present AND every expected query parameter appears.
+# Usage: assert_form_query_params <spec.yaml> <expected-paths.json>
+assert_form_query_params() {
+    local spec=$1 expected=$2
+    local rc=0
+    local path
+    path=$(json_field "$expected" form_query_params_path)
+
+    if ! grep -qE "^\s*\"?${path}\"?:\s*\$" "$spec"; then
+        echo "  detail: form action path ${path} not found in spec" >&2
+        rc=1
+    fi
+
+    local p
+    while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        if ! grep -qE "name: ${p}\$" "$spec"; then
+            echo "  detail: GET-form query parameter '${p}' not found (expected on ${path})" >&2
+            rc=1
+        fi
+    done < <(json_array "$expected" form_query_params)
+
+    if [ $rc -ne 0 ]; then
+        log_fail "Form query params: missing expected parameter(s) on ${path}"
+        return 1
+    fi
+    log_ok "Form query params: ${path} exposes all expected form-derived parameters"
+    return 0
+}
+
+test_forms_target() {
+    local port="${FORMS_TARGET_PORT:-8994}"
+    local base_url="http://${TEST_HOST}:${port}"
+    local target_dir="${RESULTS_DIR}/forms-target"
+    local capture_file="${target_dir}/capture.json"
+    local spec_file="${target_dir}/spec.yaml"
+    local spec_fields_file="${target_dir}/spec-fields.yaml"
+    local expected="${SCRIPT_DIR}/forms-target/expected-paths.json"
+    local verbose_flag=""
+
+    [ "${VERBOSE:-false}" = true ] && verbose_flag="-v"
+
+    mkdir -p "$target_dir"
+    init_test_status "forms-target"
+
+    local start=$SECONDS
+    local failures=0
+
+    log_header "Testing: forms-target (${base_url})"
+
+    # Step 1: Crawl — both backends (http and rod), mirroring rest-api. The http
+    # backend (headless=false) is the capture used for spec generation; forms are
+    # static HTML so the http body is all analyze.ExtractForms needs. The rod
+    # backend is a parity check that degrades gracefully without Chrome.
+    for hl in false true; do
+        local cap="${target_dir}/capture-${hl}.json"
+        if [ "$hl" = "true" ]; then
+            if ! chrome_available; then
+                log_warn "forms-target[headless=true]: Chrome unavailable, skipping rod backend"
+                continue
+            fi
+        fi
+        log_info "Crawling ${base_url} (headless=${hl})..."
+        if ! crawl_backend "$base_url" "$cap" "$hl" --depth 2 --max-pages 50 --timeout 2m $verbose_flag; then
+            if [ "$hl" = "true" ]; then
+                log_warn "forms-target[headless=true]: crawl failed (Chrome may be unlaunchable), skipping rod backend"
+                continue
+            fi
+            log_fail "Crawl failed (headless=${hl})"
+            set_test_result "forms-target" "FAIL" "?" "?" "$((SECONDS - start))"
+            return 1
+        fi
+        local n; n=$(json_len "$cap")
+        log_info "forms-target[headless=${hl}]: ${n} requests captured"
+        if ! validate_capture "$cap" 1; then
+            failures=$((failures + 1))
+        fi
+    done
+
+    cp "${target_dir}/capture-false.json" "$capture_file" 2>/dev/null || true
+
+    # Step 2: Generate at the default 0.5 confidence. POST forms score 0.7
+    # (non-GET method) and appear standalone; /api/search is captured directly
+    # via its <a href> link. /api/login, /api/register and /api/feedback have NO
+    # real handler and are never linked or fetched, so they reach the spec ONLY
+    # via analyze.ExtractForms — the core end-to-end regression guard.
+    log_info "Generating OpenAPI spec (default confidence)..."
+    if ! "$VESPASIAN" generate rest "$capture_file" \
+        -o "$spec_file" \
+        --probe=false \
+        $verbose_flag 2>&1; then
+        log_fail "Generate failed"
+        set_test_result "forms-target" "FAIL" "?" "?" "$((SECONDS - start))"
+        return 1
+    fi
+
+    # Step 3: Validate the form-derived endpoints.
+    if ! validate_openapi_structure "$spec_file"; then
+        failures=$((failures + 1))
+    fi
+    if ! validate_path_coverage "$spec_file" "$expected"; then
+        failures=$((failures + 1))
+    fi
+    if ! validate_no_static_assets "$spec_file"; then
+        failures=$((failures + 1))
+    fi
+    # Each POST form endpoint must carry a post operation. The generator emits
+    # "summary: Post <path>" per operation (same convention assert_js_static_details
+    # relies on), so a missing line means form extraction/classification regressed.
+    local pp
+    while IFS= read -r pp; do
+        [ -z "$pp" ] && continue
+        if ! grep -qE "summary: Post ${pp}\$" "$spec_file"; then
+            log_fail "forms-target: expected POST operation for ${pp} (no 'summary: Post ${pp}')"
+            failures=$((failures + 1))
+        fi
+    done < <(json_array "$expected" post_form_paths)
+
+    # Each urlencoded POST form's input names must surface as request-body
+    # schema properties (a bare "<indent><field>:" key — the same shape
+    # assert_js_static_details checks for body_fields). This is the strongest
+    # form-extraction signal: it proves ExtractForms recovered the
+    # <input>/<select>/<textarea> names, not just the endpoint. multipart
+    # (/api/feedback) body-field schemas are not inferred, so its fields are
+    # intentionally omitted from post_form_body_fields.
+    local ff
+    while IFS= read -r ff; do
+        [ -z "$ff" ] && continue
+        if ! grep -qE "^\s+${ff}:\s*\$" "$spec_file"; then
+            log_fail "forms-target: POST-form field '${ff}' not found as a request-body schema property"
+            failures=$((failures + 1))
+        fi
+    done < <(json_array "$expected" post_form_body_fields)
+
+    # Step 4: GET-form field validation. A GET form scores 0 confidence (no body,
+    # no API content-type) so it is filtered out at the default 0.5 threshold;
+    # re-generate at --confidence 0 so the synthetic GET-form request survives
+    # classification and Deduplicate merges its query params onto /api/search.
+    log_info "Generating OpenAPI spec (--confidence 0) for GET-form field validation..."
+    if "$VESPASIAN" generate rest "$capture_file" \
+        -o "$spec_fields_file" \
+        --confidence 0 \
+        --probe=false \
+        $verbose_flag 2>&1; then
+        if ! assert_form_query_params "$spec_fields_file" "$expected"; then
+            failures=$((failures + 1))
+        fi
+    else
+        log_fail "Generate (--confidence 0) failed"
+        failures=$((failures + 1))
+    fi
+
+    local endpoint_count
+    endpoint_count=$(count_spec_endpoints "$spec_file")
+    local expected_count
+    expected_count=$(json_field "$expected" total_paths)
+
+    local duration=$((SECONDS - start))
+    if [ $failures -eq 0 ]; then
+        set_test_result "forms-target" "PASS" "$endpoint_count" "$expected_count" "$duration"
+        log_ok "forms-target: ALL CHECKS PASSED (${duration}s)"
+    else
+        set_test_result "forms-target" "FAIL" "$endpoint_count" "$expected_count" "$duration"
+        log_fail "forms-target: ${failures} check(s) failed (${duration}s)"
     fi
 }
 
@@ -2955,6 +3134,7 @@ main() {
             graphql-server)  test_graphql_server ;;
             grpc-server)     test_grpc_server ;;
             concat-spa)      test_concat_spa ;;
+            forms-target)    test_forms_target ;;
             import-burp)        test_import_burp ;;
             import-har)         test_import_har ;;
             import-base64)      test_import_base64 ;;

@@ -163,7 +163,7 @@ if [[ "$FAIL" -eq "$drift_fail_before" ]]; then
 fi
 
 echo ""
-echo "=== Absolute group-size anchors (AC#3: 19 offline + 6 live = 25) ==="
+echo "=== Absolute group-size anchors (AC#3: 19 offline + 7 live = 26) ==="
 
 # Pin concrete group sizes as literals, independent of the sourced arrays. The
 # behavioral --group tests derive expected from the same OFFLINE_TARGETS/
@@ -175,15 +175,15 @@ if [[ "${#OFFLINE_TARGETS[@]}" -eq 19 ]]; then
 else
     fail "OFFLINE_TARGETS count drifted: expected 19, got ${#OFFLINE_TARGETS[@]}"
 fi
-if [[ "${#LIVE_TARGETS[@]}" -eq 6 ]]; then
-    pass "LIVE_TARGETS has exactly 6 members"
+if [[ "${#LIVE_TARGETS[@]}" -eq 7 ]]; then
+    pass "LIVE_TARGETS has exactly 7 members"
 else
-    fail "LIVE_TARGETS count drifted: expected 6, got ${#LIVE_TARGETS[@]}"
+    fail "LIVE_TARGETS count drifted: expected 7, got ${#LIVE_TARGETS[@]}"
 fi
-if [[ "$group_count" -eq 25 ]]; then
-    pass "Grouped targets total 25 (AC#3: all 25 targets still run)"
+if [[ "$group_count" -eq 26 ]]; then
+    pass "Grouped targets total 26 (AC#3: all 26 targets still run)"
 else
-    fail "Grouped-target total drifted: expected 25, got $group_count"
+    fail "Grouped-target total drifted: expected 26, got $group_count"
 fi
 
 echo ""
