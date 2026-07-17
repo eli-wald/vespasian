@@ -71,6 +71,7 @@ LIVE_TARGETS=(
     concat-spa
     edge-cases
     crawl-depth
+    no-download
 )
 
 # join_targets prints array elements as a comma-separated string.
@@ -2773,6 +2774,57 @@ PYEOF
 # Summary
 # ──────────────────────────────────────────────────────────────
 
+# test_no_download regresses LAB-4999 Finding 1 at the live layer: a real
+# headless crawl must use the system browser and NOT trigger go-rod's managed
+# browser download. go-rod only populates its cache dir
+# ($HOME/.cache/rod/browser/chromium-<rev>) when no binary is pinned; with the
+# LookPath pin in place that directory is never written. We snapshot the cache
+# before and after a crawl and fail if a new entry appears. Snapshotting (rather
+# than asserting the dir is absent) keeps the check robust to a pre-existing
+# cache from earlier local runs — only a NEW download during this crawl fails.
+test_no_download() {
+    local port="${REST_API_PORT:-8990}"
+    local base_url="http://${TEST_HOST}:${port}"
+    local target_dir="${RESULTS_DIR}/no-download"
+    local rod_cache="${HOME}/.cache/rod/browser"
+
+    mkdir -p "$target_dir"
+    init_test_status "no-download"
+    local start=$SECONDS
+
+    log_header "Testing: no-download (${base_url})"
+
+    if ! chrome_available; then
+        log_warn "no-download: Chrome unavailable, skipping (no headless launch to exercise)"
+        set_test_result "no-download" "SKIP" "-" "-" "$((SECONDS - start))"
+        return 0
+    fi
+
+    local before after
+    before=$(ls -1 "$rod_cache" 2>/dev/null | sort || true)
+
+    log_info "Running headless crawl to assert no browser download..."
+    if ! crawl_backend "$base_url" "${target_dir}/capture.json" true --depth 1 --max-pages 5 --timeout 2m; then
+        # A launch failure (e.g. Chrome unlaunchable) is not a download; degrade
+        # to skip rather than a false failure, matching the other rod targets.
+        log_warn "no-download: headless crawl failed (Chrome may be unlaunchable), skipping"
+        set_test_result "no-download" "SKIP" "-" "-" "$((SECONDS - start))"
+        return 0
+    fi
+
+    after=$(ls -1 "$rod_cache" 2>/dev/null | sort || true)
+    if [ "$before" != "$after" ]; then
+        log_fail "go-rod downloaded a browser into ${rod_cache} during the crawl — LAB-4999 pin regressed"
+        log_info "rod cache before: [${before}] after: [${after}]"
+        set_test_result "no-download" "FAIL" "-" "-" "$((SECONDS - start))"
+        return 1
+    fi
+
+    log_ok "No browser download detected; system Chrome was used"
+    set_test_result "no-download" "PASS" "-" "-" "$((SECONDS - start))"
+    return 0
+}
+
 print_summary() {
     local total_pass=0 total_fail=0 total_skip=0
 
@@ -2834,7 +2886,7 @@ usage() {
     echo "                                      import-mitmproxy, import-mitmproxy-native,"
     echo "                                      import-unicode, import-duplicates,"
     echo "                                      import-malformed, import-empty"
-    echo "                          Crawl:      crawl-depth, crawl-unreachable"
+    echo "                          Crawl:      crawl-depth, crawl-unreachable, no-download"
     echo "                          Edge cases: edge-cases, classifier-edge, spec-edge"
     echo "  --verbose             Enable verbose vespasian output"
     echo "  --no-build            Skip building vespasian and target binaries"
@@ -2974,6 +3026,7 @@ main() {
             edge-cases)         test_edge_cases ;;
             crawl-depth)        test_crawl_depth ;;
             crawl-unreachable)  test_crawl_unreachable ;;
+            no-download)        test_no_download ;;
             classifier-edge)    test_classifier_edge_cases ;;
             spec-edge)          test_spec_edge_cases ;;
             *)

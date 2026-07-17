@@ -69,6 +69,12 @@ For the slug-merging test (`generate-merge-slugs`, offline — no server or brow
 2. **Assert default (off)** — both `/api/posts/*` siblings survive as distinct paths (the LAB-4107 regression guard) while `/api/users/{userId}` is still ID-normalized
 3. **Assert `--merge-slugs`** — the slug siblings collapse to `/api/posts/{postSlug}` and `/api/users/{userId}` normalization is unaffected
 
+For the egress guard (`no-download`, LAB-4999 Finding 1):
+
+1. **Snapshot** the go-rod browser cache (`$HOME/.cache/rod/browser`)
+2. **Crawl** the rest-api target headless (which must use the system Chrome)
+3. **Assert** no new entry appeared in the cache — a new `chromium-<rev>` directory means go-rod auto-downloaded a browser from a third-party mirror, i.e. the system-Chrome pin regressed. Skips cleanly when Chrome is unavailable.
+
 For importer tests:
 
 1. **Import** — `vespasian import burp fixtures/sample-burp-export.xml -o imported.json`
@@ -132,7 +138,7 @@ Options:
                                       import-mitmproxy, import-mitmproxy-native,
                                       import-unicode, import-duplicates,
                                       import-malformed, import-empty
-                          Crawl:      crawl-depth, crawl-unreachable
+                          Crawl:      crawl-depth, crawl-unreachable, no-download
                           Edge cases: edge-cases, classifier-edge, spec-edge
   --verbose             Enable verbose vespasian output
   --no-build            Skip building vespasian and target binaries
