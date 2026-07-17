@@ -268,21 +268,24 @@ Results are saved to `test/.results/` with one subdirectory per test:
 
 ## Expected Results
 
-All 23 tests should pass. Order is non-deterministic and durations vary by machine (live crawl tests take the longest).
+All 27 tests should pass. Order is non-deterministic and durations vary by machine (live crawl tests take the longest).
 
 ```
   TARGET                      STATUS    ENDPOINTS   EXPECTED   DURATION
   --------------------------  --------  ----------  ---------  --------
   classifier-edge             PASS      -           -          0s
+  concat-spa                  PASS      2           2          41s
   crawl-depth                 PASS      -           -          188s
   crawl-unreachable           PASS      0           0          39s
   edge-cases                  PASS      -           -          193s
+  forms-target                PASS      4           4          55s
   generate-graphql            PASS      8           8          0s
   generate-graphql-imports    PASS      2           2          0s
   generate-js-static          PASS      3           3          1s
   generate-merge-slugs        PASS      3           3          0s
   generate-rest               PASS      8           8          0s
   generate-wsdl               PASS      3           3          1s
+  generate-wsdl-matrix        PASS      3           3          1s
   graphql-server              PASS      8           8          1s
   grpc-server                 PASS      3           3          1s
   import-base64               PASS      2           2          0s
@@ -298,7 +301,7 @@ All 23 tests should pass. Order is non-deterministic and durations vary by machi
   soap-service                PASS      3           3          51s
   spec-edge                   PASS      -           -          0s
 
-  Total: 23 passed, 0 failed, 0 skipped
+  Total: 27 passed, 0 failed, 0 skipped
 ```
 
 Some tests emit warnings (`[WARN]`) for soft behavioral checks. These are informational and do not cause failures.

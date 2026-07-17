@@ -169,7 +169,7 @@ echo "=== Absolute group-size anchors (AC#3: 19 offline + 7 live = 26) ==="
 # behavioral --group tests derive expected from the same OFFLINE_TARGETS/
 # LIVE_TARGETS under test, so a coordinated silent target drop shrinks expected
 # and actual in lockstep and passes green. These literals encode the LAB-4773
-# AC#3 contract ("all 25 targets still run") so any such drop trips here.
+# AC#3 contract ("all 26 targets still run") so any such drop trips here.
 if [[ "${#OFFLINE_TARGETS[@]}" -eq 19 ]]; then
     pass "OFFLINE_TARGETS has exactly 19 members"
 else

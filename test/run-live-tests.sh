@@ -509,38 +509,346 @@ test_concat_spa() {
 }
 
 # assert_form_query_params verifies the GET <form>'s query parameters were
-# extracted and merged onto the form's action endpoint in the generated spec.
-# A GET form contributes OpenAPI query parameters (rendered as "- name: <p>"),
-# unlike a urlencoded POST form whose request-body schema the REST generator
-# does not yet infer (deferred companion ticket to LAB-2109). Reads
-# form_query_params_path + form_query_params from expected-paths.json. Returns
-# 0 if the action path is present AND every expected query parameter appears.
+# extracted and merged onto /api/search's GET operation SPECIFICALLY - not
+# merely present somewhere in the spec. It reads form_query_params_path +
+# form_query_params from expected-paths.json and asserts each expected parameter
+# is an `in: query` parameter under that path's GET operation, pairing name/in
+# per parameter item. This closes the false-pass gap of the previous whole-file
+# `grep "name: <p>"`: a parameter that leaked onto a different path/operation, a
+# same-named schema property elsewhere, or an unanchored substring match (e.g.
+# single-char `q` matching `username: q`) no longer satisfies the check.
 # Usage: assert_form_query_params <spec.yaml> <expected-paths.json>
 assert_form_query_params() {
     local spec=$1 expected=$2
-    local rc=0
-    local path
-    path=$(json_field "$expected" form_query_params_path)
+    local result rc=0
+    result=$(python3 - "$spec" "$expected" << 'PYEOF'
+import sys, json, re
 
-    if ! grep -qE "^\s*\"?${path}\"?:\s*\$" "$spec"; then
-        echo "  detail: form action path ${path} not found in spec" >&2
-        rc=1
-    fi
+# Scoped GET-form query-parameter check. argv[1]=spec.yaml argv[2]=expected-paths.json.
+spec_file = sys.argv[1]
+expected_json = sys.argv[2]
 
-    local p
-    while IFS= read -r p; do
-        [ -z "$p" ] && continue
-        if ! grep -qE "name: ${p}\$" "$spec"; then
-            echo "  detail: GET-form query parameter '${p}' not found (expected on ${path})" >&2
-            rc=1
-        fi
-    done < <(json_array "$expected" form_query_params)
+with open(expected_json) as f:
+    exp = json.load(f)
+target_path = exp["form_query_params_path"]
+expected = exp["form_query_params"]
 
-    if [ $rc -ne 0 ]; then
-        log_fail "Form query params: missing expected parameter(s) on ${path}"
+with open(spec_file) as f:
+    lines = f.read().split("\n")
+
+
+def ind(s):
+    return len(s) - len(s.lstrip(" "))
+
+
+def fail(detail):
+    sys.stderr.write("  detail: " + detail + "\n")
+    print("Form query params: missing/mislocated expected parameter(s) on %s" % target_path)
+    sys.exit(1)
+
+
+# Locate the paths: section and the target path's block.
+in_paths = False
+paths_indent = None
+path_start = None
+path_indent = None
+for i, line in enumerate(lines):
+    st = line.rstrip()
+    if re.match(r"^paths:\s*$", st):
+        in_paths = True
+        continue
+    if in_paths:
+        if st and not st[0].isspace():
+            break
+        m = re.match(r'^(\s+)(?:"(/[^"]*)"|\'(/[^\']*)\'|(/[^:"\']*)):\s*$', st)
+        if m:
+            k_indent = len(m.group(1))
+            if paths_indent is None:
+                paths_indent = k_indent
+            if k_indent == paths_indent:
+                key = m.group(2) or m.group(3) or m.group(4)
+                if key == target_path:
+                    path_start = i
+                    path_indent = k_indent
+                    break
+
+if path_start is None:
+    fail("path %s not found in spec" % target_path)
+
+# Path block: contiguous lines more-indented than the path key.
+p_end = len(lines)
+for j in range(path_start + 1, len(lines)):
+    if lines[j].strip() and ind(lines[j]) <= path_indent:
+        p_end = j
+        break
+pblock = lines[path_start + 1:p_end]
+
+# Find the GET operation block within the path block.
+get_start = None
+get_indent = None
+for k, line in enumerate(pblock):
+    if re.match(r"^\s+get:\s*$", line):
+        get_start = k
+        get_indent = ind(line)
+        break
+if get_start is None:
+    fail("%s has no GET operation" % target_path)
+g_end = len(pblock)
+for j in range(get_start + 1, len(pblock)):
+    if pblock[j].strip() and ind(pblock[j]) <= get_indent:
+        g_end = j
+        break
+gblock = pblock[get_start + 1:g_end]
+
+# Find the parameters: list within the GET operation; pair name/in per item.
+params_start = None
+params_indent = None
+for k, line in enumerate(gblock):
+    if re.match(r"^\s+parameters:\s*$", line):
+        params_start = k
+        params_indent = ind(line)
+        break
+
+query_names = set()
+if params_start is not None:
+    items = []
+    cur = {}
+    for line in gblock[params_start + 1:]:
+        if line.strip() and ind(line) <= params_indent:
+            break
+        st = line.strip()
+        if st.startswith("- "):
+            if cur:
+                items.append(cur)
+            cur = {}
+            st = st[2:].strip()
+        m = re.match(r"(name|in):\s*(\S+)", st)
+        if m:
+            cur[m.group(1)] = m.group(2)
+    if cur:
+        items.append(cur)
+    query_names = {it["name"] for it in items if it.get("in") == "query" and "name" in it}
+
+missing = [p for p in expected if p not in query_names]
+if missing:
+    sys.stderr.write("  detail: found query params on %s GET: %s\n"
+                     % (target_path, ", ".join(sorted(query_names)) or "none"))
+    fail("%s GET operation missing query param(s): %s" % (target_path, ", ".join(missing)))
+print("Form query params: %s GET exposes all expected form-derived parameters (%s)"
+      % (target_path, ", ".join(expected)))
+sys.exit(0)
+PYEOF
+    ) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_fail "${result:-Form query params: check failed}"
         return 1
     fi
-    log_ok "Form query params: ${path} exposes all expected form-derived parameters"
+    log_ok "${result}"
+    return 0
+}
+
+# assert_form_body_fields verifies each urlencoded POST <form>'s input names
+# surface as request-body schema properties UNDER THAT FORM'S OWN ENDPOINT. It
+# reads post_form_body_fields_by_path {path: [fields...]} from
+# expected-paths.json, resolves each path's POST requestBody schema (a $ref into
+# components/schemas, or an inline properties block) and asserts every expected
+# field is a property of THAT schema. This closes the false-pass gap of the
+# previous whole-file `grep "^<indent><field>:"`: a field attributed to the
+# wrong operation (e.g. all names collapsing onto one path), or masked by a
+# same-named property shared across forms (username/password in both login and
+# register), or matched from an unrelated schema property, no longer satisfies
+# the check. multipart (/api/feedback) has no inferred body schema and is
+# intentionally absent from the map.
+# Usage: assert_form_body_fields <spec.yaml> <expected-paths.json>
+assert_form_body_fields() {
+    local spec=$1 expected=$2
+    local result rc=0
+    result=$(python3 - "$spec" "$expected" << 'PYEOF'
+import sys, json, re
+
+# Scoped POST-form body-field check. argv[1]=spec.yaml argv[2]=expected-paths.json.
+spec_file = sys.argv[1]
+expected_json = sys.argv[2]
+
+with open(expected_json) as f:
+    exp = json.load(f)
+by_path = exp["post_form_body_fields_by_path"]
+
+with open(spec_file) as f:
+    lines = f.read().split("\n")
+
+
+def ind(s):
+    return len(s) - len(s.lstrip(" "))
+
+
+def section_block(name_regex, start=0, end=None):
+    if end is None:
+        end = len(lines)
+    for i in range(start, end):
+        if re.match(name_regex, lines[i]):
+            base = ind(lines[i])
+            b_end = end
+            for j in range(i + 1, end):
+                if lines[j].strip() and ind(lines[j]) <= base:
+                    b_end = j
+                    break
+            return i, base, lines[i + 1:b_end]
+    return None, None, None
+
+
+def find_path_block(path):
+    in_paths = False
+    paths_indent = None
+    for i, line in enumerate(lines):
+        st = line.rstrip()
+        if re.match(r"^paths:\s*$", st):
+            in_paths = True
+            continue
+        if in_paths:
+            if st and not st[0].isspace():
+                break
+            m = re.match(r'^(\s+)(?:"(/[^"]*)"|\'(/[^\']*)\'|(/[^:"\']*)):\s*$', st)
+            if m:
+                k_indent = len(m.group(1))
+                if paths_indent is None:
+                    paths_indent = k_indent
+                if k_indent == paths_indent:
+                    key = m.group(2) or m.group(3) or m.group(4)
+                    if key == path:
+                        p_end = len(lines)
+                        for j in range(i + 1, len(lines)):
+                            if lines[j].strip() and ind(lines[j]) <= k_indent:
+                                p_end = j
+                                break
+                        return lines[i + 1:p_end]
+    return None
+
+
+def schema_properties(schema_name):
+    ci = None
+    for i, line in enumerate(lines):
+        if re.match(r"^components:\s*$", line):
+            ci = i
+            break
+    if ci is None:
+        return None
+    _, _, sblock = section_block(r'^\s+%s:\s*$' % re.escape(schema_name), start=ci)
+    if sblock is None:
+        return None
+    props = []
+    in_props = False
+    props_indent = None
+    child_indent = None
+    for line in sblock:
+        if re.match(r"^\s+properties:\s*$", line):
+            in_props = True
+            props_indent = ind(line)
+            continue
+        if in_props:
+            if line.strip() and ind(line) <= props_indent:
+                break
+            m = re.match(r"^(\s+)([A-Za-z0-9_.$-]+):\s*$", line)
+            if m:
+                lvl = len(m.group(1))
+                if child_indent is None:
+                    child_indent = lvl
+                if lvl == child_indent:
+                    props.append(m.group(2))
+    return props
+
+
+def body_fields_for_path(path):
+    pblock = find_path_block(path)
+    if pblock is None:
+        return None, "path not found"
+    post_start = None
+    post_indent = None
+    for k, line in enumerate(pblock):
+        if re.match(r"^\s+post:\s*$", line):
+            post_start = k
+            post_indent = ind(line)
+            break
+    if post_start is None:
+        return None, "no POST operation"
+    p_end = len(pblock)
+    for j in range(post_start + 1, len(pblock)):
+        if pblock[j].strip() and ind(pblock[j]) <= post_indent:
+            p_end = j
+            break
+    postblock = pblock[post_start + 1:p_end]
+    rb_start = None
+    rb_indent = None
+    for k, line in enumerate(postblock):
+        if re.match(r"^\s+requestBody:\s*$", line):
+            rb_start = k
+            rb_indent = ind(line)
+            break
+    if rb_start is None:
+        return None, "no requestBody"
+    r_end = len(postblock)
+    for j in range(rb_start + 1, len(postblock)):
+        if postblock[j].strip() and ind(postblock[j]) <= rb_indent:
+            r_end = j
+            break
+    rbblock = postblock[rb_start + 1:r_end]
+    for line in rbblock:
+        m = re.search(r"\$ref:\s*'?#/components/schemas/([A-Za-z0-9_.-]+)'?", line)
+        if m:
+            props = schema_properties(m.group(1))
+            if props is None:
+                return None, "schema %s not found" % m.group(1)
+            return set(props), None
+    in_props = False
+    props_indent = None
+    child_indent = None
+    props = []
+    for line in rbblock:
+        if re.match(r"^\s+properties:\s*$", line):
+            in_props = True
+            props_indent = ind(line)
+            continue
+        if in_props:
+            if line.strip() and ind(line) <= props_indent:
+                break
+            m = re.match(r"^(\s+)([A-Za-z0-9_.$-]+):\s*$", line)
+            if m:
+                lvl = len(m.group(1))
+                if child_indent is None:
+                    child_indent = lvl
+                if lvl == child_indent:
+                    props.append(m.group(2))
+    if props:
+        return set(props), None
+    return None, "no request-body schema properties"
+
+
+failures = 0
+for path in sorted(by_path):
+    fields = by_path[path]
+    got, err = body_fields_for_path(path)
+    if got is None:
+        sys.stderr.write("  detail: %s: %s\n" % (path, err))
+        failures += 1
+        continue
+    missing = [f for f in fields if f not in got]
+    if missing:
+        sys.stderr.write("  detail: %s request-body missing field(s): %s (found: %s)\n"
+                         % (path, ", ".join(missing), ", ".join(sorted(got))))
+        failures += 1
+
+if failures:
+    print("POST-form body fields: %d endpoint(s) missing expected request-body field(s)" % failures)
+    sys.exit(1)
+print("POST-form body fields: every form's input names present under its own endpoint's request body")
+sys.exit(0)
+PYEOF
+    ) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_fail "${result:-POST-form body fields: check failed}"
+        return 1
+    fi
+    log_ok "${result}"
     return 0
 }
 
@@ -632,21 +940,17 @@ test_forms_target() {
         fi
     done < <(json_array "$expected" post_form_paths)
 
-    # Each urlencoded POST form's input names must surface as request-body
-    # schema properties (a bare "<indent><field>:" key — the same shape
-    # assert_js_static_details checks for body_fields). This is the strongest
-    # form-extraction signal: it proves ExtractForms recovered the
-    # <input>/<select>/<textarea> names, not just the endpoint. multipart
-    # (/api/feedback) body-field schemas are not inferred, so its fields are
-    # intentionally omitted from post_form_body_fields.
-    local ff
-    while IFS= read -r ff; do
-        [ -z "$ff" ] && continue
-        if ! grep -qE "^\s+${ff}:\s*\$" "$spec_file"; then
-            log_fail "forms-target: POST-form field '${ff}' not found as a request-body schema property"
-            failures=$((failures + 1))
-        fi
-    done < <(json_array "$expected" post_form_body_fields)
+    # Each urlencoded POST form's input names must surface as request-body schema
+    # properties UNDER THAT FORM'S OWN ENDPOINT (assert_form_body_fields resolves
+    # each path's requestBody $ref and checks that schema's properties). This is
+    # the strongest form-extraction signal: it proves ExtractForms recovered the
+    # <input>/<select>/<textarea> names AND attached them to the right operation,
+    # not merely that the names appear somewhere in the spec. multipart
+    # (/api/feedback) body schemas are not inferred, so it is intentionally
+    # absent from post_form_body_fields_by_path.
+    if ! assert_form_body_fields "$spec_file" "$expected"; then
+        failures=$((failures + 1))
+    fi
 
     # Step 4: GET-form field validation. A GET form scores 0 confidence (no body,
     # no API content-type) so it is filtered out at the default 0.5 threshold;
@@ -670,6 +974,31 @@ test_forms_target() {
     endpoint_count=$(count_spec_endpoints "$spec_file")
     local expected_count
     expected_count=$(json_field "$expected" total_paths)
+
+    # Exact-count guard: the default-confidence spec must contain EXACTLY the
+    # expected form-derived paths. A spurious extra path (a receiver literal or a
+    # crawl artifact that slipped the classifier) trips this. Mirrors the sibling
+    # test_concat_spa exact-count check.
+    if [ "$endpoint_count" != "$expected_count" ]; then
+        log_fail "forms-target: spec has ${endpoint_count} path(s), expected exactly ${expected_count}"
+        failures=$((failures + 1))
+    fi
+
+    # Paths-absent guard for the "must NOT appear" half of the contract: the
+    # crawler's GET probes of the POST-only form actions 404 and are filtered at
+    # the default 0.5 confidence, so no GET operation may exist on them. A
+    # 404/confidence-filter regression would surface as `summary: Get <path>` on
+    # a POST action. (Operation-level rather than path-level, since the path key
+    # itself is legitimately present via the POST form — so validate_paths_absent,
+    # which matches path keys, does not apply here.)
+    local gp
+    while IFS= read -r gp; do
+        [ -z "$gp" ] && continue
+        if grep -qE "summary: Get ${gp}\$" "$spec_file"; then
+            log_fail "forms-target: unexpected GET operation on POST-only action ${gp} (404/confidence filter regressed?)"
+            failures=$((failures + 1))
+        fi
+    done < <(json_array "$expected" post_form_paths)
 
     local duration=$((SECONDS - start))
     if [ $failures -eq 0 ]; then
