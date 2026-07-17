@@ -165,6 +165,14 @@ For Linux devcontainers without Docker Desktop, use the detected host gateway (e
 
 `setup-live-targets.sh` does not read `TEST_HOST` — run it on the host that actually runs the target binaries.
 
+### `FORMS_TARGET_BIND_HOST` (optional)
+
+The `forms-target` server binds `127.0.0.1` by default (via its `BIND_HOST` env var). `setup-live-targets.sh` starts it with `BIND_HOST=${FORMS_TARGET_BIND_HOST:-0.0.0.0}` so a crawler running inside a devcontainer (reaching the host via `TEST_HOST=host.docker.internal`) can connect. For host-only local runs, pin it back to loopback:
+
+```bash
+FORMS_TARGET_BIND_HOST=127.0.0.1 ./test/setup-live-targets.sh --targets forms-target
+```
+
 ### `CONFIG_FILE` (optional)
 
 `run-live-tests.sh` reads resolved ports and `TARGETS_SETUP` from `CONFIG_FILE`, which defaults to `test/.live-test-config` (written by `setup-live-targets.sh`). Override it with the `CONFIG_FILE` environment variable — an internal test-harness knob that `test/test-runner-args.sh` uses to point `--dry-run` invocations at a throwaway stub config, so the group-resolution tests need no real setup. Only an allowlisted set of keys (the `*_PORT` values and `TARGETS_SETUP`) is honored from the file.
@@ -270,7 +278,7 @@ Results are saved to `test/.results/` with one subdirectory per test:
 
 All 27 tests should pass. Order is non-deterministic and durations vary by machine (live crawl tests take the longest).
 
-```
+```text
   TARGET                      STATUS    ENDPOINTS   EXPECTED   DURATION
   --------------------------  --------  ----------  ---------  --------
   classifier-edge             PASS      -           -          0s
