@@ -2882,18 +2882,23 @@ PYEOF
 # test_no_download regresses LAB-4999 Finding 1 at the live layer: a real
 # headless crawl must use the system browser and NOT trigger go-rod's managed
 # browser download. go-rod only populates its cache dir
-# ($HOME/.cache/rod/browser/chromium-<rev>) when no binary is pinned; with the
-# LookPath pin in place that directory is never written. We snapshot the cache
-# before and after a crawl and fail if a new entry appears. Snapshotting (rather
-# than asserting the dir is absent) keeps the check robust to a pre-existing
-# cache from earlier local runs — only a NEW download during this crawl fails.
+# (<HOME>/.cache/rod/browser/chromium-<rev>) when no binary is pinned; with the
+# LookPath pin in place that directory is never written. We run the crawl under
+# an empty temporary HOME so go-rod's cache starts empty, then fail if any entry
+# appears. launcher.LookPath resolves the *system* Chrome from PATH/standard
+# locations independently of HOME, so a correct pin still finds it (no download);
+# only a regressed pin downloads into the empty cache. Isolating HOME (rather
+# than diffing the real cache) closes the gap where a warm cache at the current
+# pinned revision would let a regression reuse it without writing a new entry — a
+# false pass a before/after diff of the shared cache could not catch.
 test_no_download() {
     local port="${REST_API_PORT:-8990}"
     local base_url="http://${TEST_HOST}:${port}"
     local target_dir="${RESULTS_DIR}/no-download"
-    local rod_cache="${HOME}/.cache/rod/browser"
+    local iso_home="${target_dir}/home"
+    local rod_cache="${iso_home}/.cache/rod/browser"
 
-    mkdir -p "$target_dir"
+    mkdir -p "$target_dir" "$iso_home"
     init_test_status "no-download"
     local start=$SECONDS
 
@@ -2909,7 +2914,7 @@ test_no_download() {
     before=$(ls -1 "$rod_cache" 2>/dev/null | sort || true)
 
     log_info "Running headless crawl to assert no browser download..."
-    if ! crawl_backend "$base_url" "${target_dir}/capture.json" true --depth 1 --max-pages 5 --timeout 2m; then
+    if ! ( export HOME="$iso_home"; crawl_backend "$base_url" "${target_dir}/capture.json" true --depth 1 --max-pages 5 --timeout 2m ); then
         # A launch failure (e.g. Chrome unlaunchable) is not a download; degrade
         # to skip rather than a false failure, matching the other rod targets.
         log_warn "no-download: headless crawl failed (Chrome may be unlaunchable), skipping"
