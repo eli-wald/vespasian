@@ -102,6 +102,12 @@ func TestValidateProxyAddr(t *testing.T) {
 		{"embedded credentials", "http://user:pass@127.0.0.1:8080", true, "embedded credentials"},
 		{"embedded user only", "http://user@127.0.0.1:8080", true, "embedded credentials"},
 		{"scheme-less credentials", "user:pass@127.0.0.1:8080", true, "embedded credentials"},
+		{"ipv6 with credentials", "http://user:pass@[::1]:8080", true, "embedded credentials"},
+		// @ outside the authority (path/query/fragment) must NOT be read as
+		// credentials — pins redactProxyUserinfo's authority boundary.
+		{"at in path not credentials", "http://127.0.0.1:8080/oauth/callback@handler", false, ""},
+		{"at in query not credentials", "http://127.0.0.1:8080?next=user@host", false, ""},
+		{"ipv6 host no credentials", "http://[::1]:8080", false, ""},
 	}
 
 	for _, tt := range tests {
@@ -128,6 +134,9 @@ func TestValidateProxyAddr(t *testing.T) {
 		{"wrong scheme with creds", "ftp://admin:s3cret@proxy:21"},
 		{"user only", "http://admin@proxy:8080"},
 		{"scheme-less creds", "admin:s3cret@127.0.0.1:8080"},
+		// Credentials must be scrubbed even when the address also fails
+		// url.Parse (bad port) — the credential check runs before parsing.
+		{"bad port with creds", "http://admin:s3cret@127.0.0.1:8o80"},
 	}
 	for _, tt := range credentialLeakCases {
 		t.Run("redacted/"+tt.name, func(t *testing.T) {

@@ -247,18 +247,21 @@ func (b *BrowserManager) PID() int {
 // doCrawl, before opts.Proxy is printed) so a bad or credential-bearing proxy
 // is rejected before any network activity or logging.
 func ValidateProxyAddr(addr string) error {
+	// Reject credentials before anything else echoes the address. Every error
+	// below prints addr — including url.Parse's own error, which wraps the raw
+	// URL verbatim (net/url *Error formats it with %q) — so a credential-bearing
+	// proxy that also fails to parse (bad port, invalid %-escape) would leak the
+	// password to logs/CI output if we parsed first. redactProxyUserinfo scans
+	// the raw authority, so it catches credentials whether or not the address
+	// parses, and in both scheme-qualified (http://user:pass@host) and
+	// scheme-less (user:pass@host) forms (url.Parse only exposes u.User for the
+	// former).
+	if redacted, ok := redactProxyUserinfo(addr); ok {
+		return fmt.Errorf("invalid proxy address %q: embedded credentials are not supported (they would be visible in process listing); configure authentication in your proxy instead", redacted)
+	}
 	u, err := url.Parse(addr)
 	if err != nil {
 		return fmt.Errorf("invalid proxy address: %w", err)
-	}
-	// Check credentials first — later error messages echo the address, so we
-	// must reject (and redact) credentials before reaching them. url.Parse only
-	// populates u.User when a scheme is present (http://user:pass@host); a
-	// scheme-less "user:pass@host" leaves u.User nil and would otherwise fall
-	// through to the scheme error below, which prints the raw address and leaks
-	// the password. redactProxyUserinfo catches both forms from the raw string.
-	if redacted, ok := redactProxyUserinfo(addr); ok {
-		return fmt.Errorf("invalid proxy address %q: embedded credentials are not supported (they would be visible in process listing); configure authentication in your proxy instead", redacted)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" {
 		return fmt.Errorf("invalid proxy address %q: scheme must be http, https, or socks5", addr)
@@ -275,14 +278,15 @@ func ValidateProxyAddr(addr string) error {
 // (user:pass@host) forms — url.Parse only exposes u.User for the former, so a
 // raw-string scan is needed to keep credentials out of error messages for the
 // latter. Only the authority (after an optional "scheme://", up to the first
-// "/") is inspected, so an "@" in a path or query is not misread as credentials.
+// "/", "?" or "#" — the RFC 3986 authority delimiters) is inspected, so an "@"
+// in a path, query, or fragment is not misread as credentials.
 func redactProxyUserinfo(addr string) (string, bool) {
 	rest, prefix := addr, ""
 	if i := strings.Index(rest, "://"); i >= 0 {
 		prefix, rest = rest[:i+3], rest[i+3:]
 	}
 	authEnd := len(rest)
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
 		authEnd = i
 	}
 	at := strings.LastIndexByte(rest[:authEnd], '@')
