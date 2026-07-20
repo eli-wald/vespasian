@@ -71,9 +71,9 @@ For the slug-merging test (`generate-merge-slugs`, offline — no server or brow
 
 For the egress guard (`no-download`, LAB-4999 Finding 1):
 
-1. **Snapshot** the go-rod browser cache (`$HOME/.cache/rod/browser`)
+1. **Isolate** a fresh, empty go-rod browser cache under a temporary HOME (not the invoking shell's `$HOME`), so the check does not depend on a clean workspace
 2. **Crawl** the rest-api target headless (which must use the system Chrome)
-3. **Assert** no new entry appeared in the cache — a new `chromium-<rev>` directory means go-rod auto-downloaded a browser from a third-party mirror, i.e. the system-Chrome pin regressed. Skips cleanly when Chrome is unavailable.
+3. **Assert** the isolated cache is still empty — any `chromium-<rev>` directory means go-rod auto-downloaded a browser from a third-party mirror, i.e. the system-Chrome pin regressed. Skips cleanly when Chrome is unavailable.
 
 For importer tests:
 

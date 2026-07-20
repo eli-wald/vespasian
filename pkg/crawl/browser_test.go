@@ -177,6 +177,24 @@ func TestConfigureLauncher(t *testing.T) {
 				t.Errorf("Get(rod-bin) = %q, want empty (download fallback)", got)
 			}
 		})
+
+		t.Run("no browser with arbitrary env value still errors", func(t *testing.T) {
+			// Default-deny: only the exact string "true" opts in. Any other
+			// non-empty value must still error rather than allow a download —
+			// mirrors the NoSandbox "env false"/"env arbitrary value" cases and
+			// guards against a truthy-parsing regression.
+			stubLookPath(t, "", false)
+			for _, v := range []string{"1", "false", "TRUE", "yes"} {
+				t.Setenv("VESPASIAN_ALLOW_BROWSER_DOWNLOAD", v)
+				l, err := configureLauncher(BrowserOptions{})
+				if err == nil {
+					t.Errorf("env %q: expected no-system-Chrome error, got nil", v)
+				}
+				if l != nil {
+					t.Errorf("env %q: expected nil launcher on error", v)
+				}
+			}
+		})
 	})
 
 	// Finding 2 (LAB-4999): telemetry/phone-home-disabling flags are always

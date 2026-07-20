@@ -2883,14 +2883,15 @@ PYEOF
 # headless crawl must use the system browser and NOT trigger go-rod's managed
 # browser download. go-rod only populates its cache dir
 # (<HOME>/.cache/rod/browser/chromium-<rev>) when no binary is pinned; with the
-# LookPath pin in place that directory is never written. We run the crawl under
-# an empty temporary HOME so go-rod's cache starts empty, then fail if any entry
-# appears. launcher.LookPath resolves the *system* Chrome from PATH/standard
-# locations independently of HOME, so a correct pin still finds it (no download);
-# only a regressed pin downloads into the empty cache. Isolating HOME (rather
-# than diffing the real cache) closes the gap where a warm cache at the current
-# pinned revision would let a regression reuse it without writing a new entry — a
-# false pass a before/after diff of the shared cache could not catch.
+# LookPath pin in place that directory is never written. We wipe and recreate a
+# temporary HOME so go-rod's cache starts guaranteed-empty, run the crawl under
+# it, and fail if the cache is non-empty afterwards. launcher.LookPath resolves
+# the *system* Chrome from PATH/standard locations independently of HOME, so a
+# correct pin still finds it (no download); only a regressed pin downloads into
+# the empty cache. Starting from a freshly-wiped cache (rather than diffing a
+# shared or reused one) closes the gap where a browser left at the current pinned
+# revision by a prior run would let a regression reuse it without writing a new
+# entry — a false pass a before/after diff could not catch.
 test_no_download() {
     local port="${REST_API_PORT:-8990}"
     local base_url="http://${TEST_HOST}:${port}"
@@ -2898,6 +2899,10 @@ test_no_download() {
     local iso_home="${target_dir}/home"
     local rod_cache="${iso_home}/.cache/rod/browser"
 
+    # Wipe the isolated cache so it starts empty regardless of prior local runs
+    # (a chromium-<rev> left by an earlier regressed or opt-in-download run would
+    # otherwise mask a still-regressed pin).
+    rm -rf "$iso_home"
     mkdir -p "$target_dir" "$iso_home"
     init_test_status "no-download"
     local start=$SECONDS
@@ -2910,9 +2915,6 @@ test_no_download() {
         return 0
     fi
 
-    local before after
-    before=$(ls -1 "$rod_cache" 2>/dev/null | sort || true)
-
     log_info "Running headless crawl to assert no browser download..."
     if ! ( export HOME="$iso_home"; crawl_backend "$base_url" "${target_dir}/capture.json" true --depth 1 --max-pages 5 --timeout 2m ); then
         # A launch failure (e.g. Chrome unlaunchable) is not a download; degrade
@@ -2922,10 +2924,13 @@ test_no_download() {
         return 0
     fi
 
-    after=$(ls -1 "$rod_cache" 2>/dev/null | sort || true)
-    if [ "$before" != "$after" ]; then
+    # The freshly-wiped isolated cache must still be empty: a correct system-Chrome
+    # pin never writes it; any chromium-<rev> means go-rod downloaded a browser.
+    local downloaded
+    downloaded=$(ls -A "$rod_cache" 2>/dev/null || true)
+    if [ -n "$downloaded" ]; then
         log_fail "go-rod downloaded a browser into ${rod_cache} during the crawl — LAB-4999 pin regressed"
-        log_info "rod cache before: [${before}] after: [${after}]"
+        log_info "rod cache contents: [${downloaded}]"
         set_test_result "no-download" "FAIL" "-" "-" "$((SECONDS - start))"
         return 1
     fi
