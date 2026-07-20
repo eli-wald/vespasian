@@ -249,21 +249,15 @@ func (b *BrowserManager) PID() int {
 func ValidateProxyAddr(addr string) error {
 	// A proxy address is scheme://host[:port] and legitimately carries no
 	// userinfo, so treat any '@' as embedded credentials and reject it before
-	// anything echoes addr — masking the userinfo so a password cannot reach
-	// logs, CI output, or terminal scrollback. Scanning the whole string for
-	// '@' (rather than parsing an RFC 3986 authority) is deliberate: it has no
-	// boundary to misjudge. Earlier attempts that bounded the scan at the first
-	// '/', '?' or '#' leaked when the userinfo itself contained one of those
-	// characters — which also makes the URL unparseable, so url.Parse's error
-	// (it wraps the raw URL with %q) would then echo the password. With no '@'
-	// present the address cannot carry credentials, so the errors below may
-	// safely echo it.
+	// anything echoes addr. Mask everything up to and including the last '@':
+	// userinfo always precedes the '@', so replacing that whole span with a
+	// fixed placeholder makes it impossible for a password to reach logs, CI
+	// output, or terminal scrollback — regardless of characters in the
+	// credential ('/', '?', '#', '%', a literal '://', or extra '@'s) that a
+	// structure-aware scan could misjudge. With no '@' the address cannot carry
+	// credentials, so the errors below may safely echo it.
 	if at := strings.LastIndexByte(addr, '@'); at >= 0 {
-		start := 0
-		if i := strings.Index(addr, "://"); i >= 0 && i < at {
-			start = i + len("://")
-		}
-		masked := addr[:start] + "xxxxx:xxxxx@" + addr[at+1:]
+		masked := "xxxxx@" + addr[at+1:]
 		return fmt.Errorf("invalid proxy address %q: embedded credentials are not supported (they would be visible in process listing); configure authentication in your proxy instead", masked)
 	}
 	u, err := url.Parse(addr)

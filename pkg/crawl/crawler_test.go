@@ -144,6 +144,10 @@ func TestValidateProxyAddr(t *testing.T) {
 		// RFC-authority boundary and re-leak through the parse/scheme error.
 		{"slash in password", "http://admin:s3cret/x@proxy:8080"},
 		{"question in password", "http://admin:s3cret?x@proxy:8080"},
+		// ...and when it contains a literal '://' (would fool a scheme-prefix
+		// scan) or an extra '@' (mask must key off the LAST '@').
+		{"scheme marker in password", "admin:s3cret://@proxy.local:8080"},
+		{"extra at in credentials", "admin:s3cret@evil@proxy:8080"},
 	}
 	for _, tt := range credentialLeakCases {
 		t.Run("redacted/"+tt.name, func(t *testing.T) {
