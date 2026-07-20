@@ -9,7 +9,7 @@
 #
 # Options:
 #   --targets <list>   Comma-separated targets (default: all)
-#                      Valid: rest-api,soap-service,graphql-server,concat-spa
+#                      Valid: rest-api,soap-service,graphql-server,grpc-server,concat-spa,forms-target
 #   --skip-start       Only build, don't start services
 #   --teardown         Stop all running targets and clean up
 #   --sweep            With --teardown, also sweep untracked orphans by name/port
