@@ -82,7 +82,7 @@ func BuildHTTPClient(p ProxyConfig, timeout time.Duration,
 	// through the tunnel — so verification is always kept for socks5.
 	if p.Insecure && p.URL != nil && (p.URL.Scheme == "http" || p.URL.Scheme == "https") {
 		// #nosec G402 -- opt-in via --proxy-insecure for http/https proxy MITM; socks5 always verifies (see package doc)
-		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
 	}
 	return &http.Client{
 		Transport:     t,
@@ -199,7 +199,7 @@ func connectDialer(p ProxyConfig) func(ctx context.Context, addr string) (net.Co
 // https-scheme proxy (cert verified unless p.Insecure), plain TCP otherwise.
 func dialProxy(ctx context.Context, p ProxyConfig) (net.Conn, error) {
 	if p.URL.Scheme == "https" {
-		tlsCfg := &tls.Config{ServerName: p.URL.Hostname()}
+		tlsCfg := &tls.Config{ServerName: p.URL.Hostname(), MinVersion: tls.VersionTLS12}
 		if p.Insecure {
 			// #nosec G402 -- opt-in via --proxy-insecure for https proxy MITM
 			tlsCfg.InsecureSkipVerify = true
