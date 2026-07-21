@@ -178,12 +178,12 @@ func startTCPEchoServer(t *testing.T) (addr string, stop func()) {
 				if err != nil {
 					return
 				}
-				c.Write(buf[:n]) //nolint:errcheck // test best-effort echo
+				c.Write(buf[:n]) //nolint:errcheck,gosec // test best-effort echo
 			}(conn)
 		}
 	}()
 
-	return ln.Addr().String(), func() { ln.Close() } //nolint:errcheck // test cleanup
+	return ln.Addr().String(), func() { ln.Close() } //nolint:errcheck,gosec // test cleanup
 }
 
 // startRecordingCONNECTProxy starts a minimal HTTP CONNECT proxy on loopback
@@ -233,10 +233,10 @@ func startRecordingCONNECTProxy(t *testing.T, targetAddr string) (addr string, r
 
 		done := make(chan struct{})
 		go func() {
-			io.Copy(targetConn, reader) //nolint:errcheck // test tunnel copy
+			io.Copy(targetConn, reader) //nolint:errcheck,gosec // test tunnel copy
 			close(done)
 		}()
-		io.Copy(conn, targetConn) //nolint:errcheck // test tunnel copy
+		io.Copy(conn, targetConn) //nolint:errcheck,gosec // test tunnel copy
 		<-done
 	}()
 
@@ -245,7 +245,7 @@ func startRecordingCONNECTProxy(t *testing.T, targetAddr string) (addr string, r
 			v, _ := recorded.Load().(string)
 			return v
 		},
-		func() { ln.Close() } //nolint:errcheck // test cleanup
+		func() { ln.Close() } //nolint:errcheck,gosec // test cleanup
 }
 
 func TestProxyDialer_HTTPConnectTunnel(t *testing.T) {
@@ -347,7 +347,7 @@ func startSOCKS5TestServer(t *testing.T) (addr string, stop func()) {
 
 		targetConn, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		if err != nil {
-			conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) //nolint:errcheck // test best-effort failure reply
+			conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) //nolint:errcheck,gosec // test best-effort failure reply
 			return
 		}
 		defer targetConn.Close() //nolint:errcheck // test cleanup
@@ -359,14 +359,14 @@ func startSOCKS5TestServer(t *testing.T) (addr string, stop func()) {
 
 		done := make(chan struct{})
 		go func() {
-			io.Copy(targetConn, conn) //nolint:errcheck // test tunnel copy
+			io.Copy(targetConn, conn) //nolint:errcheck,gosec // test tunnel copy
 			close(done)
 		}()
-		io.Copy(conn, targetConn) //nolint:errcheck // test tunnel copy
+		io.Copy(conn, targetConn) //nolint:errcheck,gosec // test tunnel copy
 		<-done
 	}()
 
-	return ln.Addr().String(), func() { ln.Close() } //nolint:errcheck // test cleanup
+	return ln.Addr().String(), func() { ln.Close() } //nolint:errcheck,gosec // test cleanup
 }
 
 func TestProxyDialer_SOCKS5(t *testing.T) {

@@ -16,6 +16,7 @@ package pipeline_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -229,7 +230,13 @@ func TestResolveAndGenerate_ForwardsProxy(t *testing.T) {
 			return
 		}
 		defer resp.Body.Close() //nolint:errcheck // test cleanup
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
 		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body) //nolint:errcheck,gosec // test proxy
 	}))
 	t.Cleanup(proxy.Close)
 
