@@ -770,3 +770,96 @@ func TestDefaultSourcemapClient_ProxyRefusesRedirects(t *testing.T) {
 		t.Error("proxied client's CheckRedirect must refuse the redirect (return an error), like noFollowRedirects does")
 	}
 }
+
+// TestSourcemap_ProxiedFetch_AllowPrivateGate is a regression test for
+// SEC-BE-001 (PR #186 review): it is the proxy-path counterpart to
+// TestSourcemap_AllowPrivateGate. When a proxy is configured,
+// defaultSourcemapClient's proxy branch (httpx.BuildHTTPClient) deliberately
+// installs no dial-time SSRF pin — we dial the proxy, not the target — so
+// today NOTHING validates mapURL at the URL level for the proxied path. A
+// private/loopback-host mapURL must still be rejected when AllowPrivate=false
+// (the developer will add probe.ValidateProbeURL(mapURL) gated on
+// !allowPrivate), and allowed when AllowPrivate=true. Uses a recording proxy
+// so the AllowPrivate=false case can assert the proxy is never even contacted
+// — the strongest proof the validator runs before any network I/O.
+func TestSourcemap_ProxiedFetch_AllowPrivateGate(t *testing.T) {
+	content := []string{"var y = 2;"}
+	body := makeSourcemapJSON(content)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer origin.Close()
+
+	newRecordingProxy := func(t *testing.T) (proxyURL *url.URL, hits *atomic.Int64, stop func()) {
+		t.Helper()
+		var proxied atomic.Int64
+		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			proxied.Add(1)
+			outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.RequestURI, nil) //nolint:gosec // test proxy forwards the received request URI
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			resp, err := http.DefaultTransport.RoundTrip(outReq)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close() //nolint:errcheck // test cleanup
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+		}))
+		u, err := url.Parse(proxy.URL)
+		if err != nil {
+			t.Fatalf("parse proxy URL: %v", err)
+		}
+		return u, &proxied, proxy.Close
+	}
+
+	mapURL := origin.URL + "/app.js.map" // origin.URL is http://127.0.0.1:PORT — a private/loopback host
+	bundleURL := origin.URL + "/app.js"
+	bundle := []byte(fmt.Sprintf("console.log(1);\n//# sourceMappingURL=%s\n", mapURL))
+
+	t.Run("AllowPrivate=false rejects the private-host mapURL", func(t *testing.T) {
+		proxyURL, hits, stop := newRecordingProxy(t)
+		defer stop()
+
+		opts := Options{
+			FetchSourcemaps: true,
+			AllowPrivate:    false,
+			Proxy:           httpx.ProxyConfig{URL: proxyURL},
+		}
+		sources, stats := recoverSourcemap(context.Background(), bundle, bundleURL, opts)
+		if len(sources) != 0 {
+			t.Errorf("AllowPrivate=false: expected 0 sources, got %d", len(sources))
+		}
+		if stats.SourcemapFetchFails != 1 {
+			t.Errorf("AllowPrivate=false: expected 1 fetch fail, got %d", stats.SourcemapFetchFails)
+		}
+		if hits.Load() != 0 {
+			t.Errorf("AllowPrivate=false: proxy must never be contacted for a private-host mapURL; got %d hits", hits.Load())
+		}
+	})
+
+	t.Run("AllowPrivate=true allows the private-host mapURL", func(t *testing.T) {
+		proxyURL, hits, stop := newRecordingProxy(t)
+		defer stop()
+
+		opts := Options{
+			FetchSourcemaps: true,
+			AllowPrivate:    true,
+			Proxy:           httpx.ProxyConfig{URL: proxyURL},
+		}
+		sources, stats := recoverSourcemap(context.Background(), bundle, bundleURL, opts)
+		if len(sources) != 1 {
+			t.Fatalf("AllowPrivate=true: expected 1 source, got %d", len(sources))
+		}
+		if stats.SourcemapsRecovered != 1 {
+			t.Errorf("AllowPrivate=true: expected 1 recovered, got %d", stats.SourcemapsRecovered)
+		}
+		if hits.Load() == 0 {
+			t.Error("AllowPrivate=true: expected the proxy to be contacted")
+		}
+	})
+}

@@ -92,6 +92,21 @@ func recoverSourcemap(ctx context.Context, bundle []byte, bundleURL string, opts
 		return nil, stats
 	}
 
+	// URL-level SSRF validation (SEC-BE-001): reject a private/internal mapURL
+	// unless the operator opted in via --dangerous-allow-private. This is the
+	// only SSRF gate on the proxied path — defaultSourcemapClient's proxy branch
+	// clears the dial-time pin (it dials the proxy, not the target) — so without
+	// this a proxied fetch could reach an internal host. Runs before any client
+	// construction/network I/O so it covers BOTH the nil-HTTPClient (default/
+	// proxied) and caller-supplied paths, mirroring the probe/WSDL/JS-replay
+	// stages (see internal/pipeline/wsdl_probe.go).
+	if !opts.AllowPrivate {
+		if err := probe.ValidateProbeURL(mappingURL); err != nil {
+			stats.SourcemapFetchFails++
+			return nil, stats
+		}
+	}
+
 	client := opts.HTTPClient
 	if client == nil {
 		client = defaultSourcemapClient(opts.AllowPrivate, opts.Proxy)
