@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -131,9 +132,27 @@ func ProxyDialer(p ProxyConfig) (func(ctx context.Context, addr string) (net.Con
 // tunneled bytes are plaintext to the caller.
 func connectDialer(p ProxyConfig) func(ctx context.Context, addr string) (net.Conn, error) {
 	return func(ctx context.Context, addr string) (net.Conn, error) {
+		// Reject CR/LF in the target before it reaches the CONNECT request line:
+		// otherwise an attacker-influenced addr could smuggle extra header lines
+		// or a second request into the bytes written to the proxy. net.SplitHostPort
+		// does NOT catch this (the payload splits cleanly), so check explicitly.
+		if strings.ContainsAny(addr, "\r\n") {
+			return nil, fmt.Errorf("httpx: invalid proxy target address %q: contains CR or LF", addr)
+		}
+
 		conn, err := dialProxy(ctx, p)
 		if err != nil {
 			return nil, err
+		}
+
+		// Bound the CONNECT handshake by the caller's context deadline so a
+		// silent/slow proxy cannot hang the dial past it. Cleared on success so
+		// it does not leak into the tunneled traffic that follows.
+		if dl, ok := ctx.Deadline(); ok {
+			if err := conn.SetDeadline(dl); err != nil {
+				conn.Close() //nolint:errcheck,gosec // best-effort cleanup on deadline-set failure
+				return nil, fmt.Errorf("httpx: setting proxy CONNECT deadline: %w", err)
+			}
 		}
 
 		req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", addr, addr)
@@ -152,6 +171,12 @@ func connectDialer(p ProxyConfig) func(ctx context.Context, addr string) (net.Co
 		if resp.StatusCode != http.StatusOK {
 			conn.Close() //nolint:errcheck,gosec // best-effort cleanup on non-200
 			return nil, fmt.Errorf("httpx: proxy CONNECT to %s failed: %s", addr, resp.Status)
+		}
+
+		// Clear the handshake deadline so it does not apply to tunneled traffic.
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			conn.Close() //nolint:errcheck,gosec // best-effort cleanup on deadline-clear failure
+			return nil, fmt.Errorf("httpx: clearing proxy CONNECT deadline: %w", err)
 		}
 
 		// Preserve any bytes the proxy pipelined past the CONNECT reply so the

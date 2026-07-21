@@ -274,8 +274,11 @@ func defaultSourcemapClient(allowPrivate bool, proxy httpx.ProxyConfig) *http.Cl
 		// the target). This is the production path (pipeline leaves HTTPClient
 		// nil); an injected HTTPClient opts out of Proxy — recoverSourcemap
 		// overwrites its Transport with ssrfSafeTransport, which would clobber a
-		// proxied dialer.
-		return httpx.BuildHTTPClient(proxy, 10*time.Second, nil)
+		// proxied dialer. Redirects are refused (noFollowRedirects, same as the
+		// non-proxy branch): the sameHost check only vets the initial URL and the
+		// dial-pin is dropped when proxied, so following a cross-host 302 would be
+		// an SSRF backstop gap.
+		return httpx.BuildHTTPClient(proxy, 10*time.Second, noFollowRedirects)
 	}
 	return &http.Client{
 		Timeout:       10 * time.Second,

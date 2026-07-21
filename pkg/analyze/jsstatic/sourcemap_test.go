@@ -746,3 +746,27 @@ func TestDefaultSourcemapClient_ProxyVsSSRF(t *testing.T) {
 		}
 	})
 }
+
+// TestDefaultSourcemapClient_ProxyRefusesRedirects is a regression test for
+// an SSRF-via-redirect gap (LAB-4993 review): the proxy branch of
+// defaultSourcemapClient passes `nil` as the checkRedirect func to
+// httpx.BuildHTTPClient, so the returned client falls back to net/http's
+// default CheckRedirect (follow up to 10 redirects) instead of refusing them
+// like the non-proxy branch does (CheckRedirect: noFollowRedirects). Mirrors
+// the non-proxy parity assertion pattern from F12a
+// (TestSourcemap_RedirectToDifferentHostBlocked): a proxied client must
+// refuse redirects exactly like the unproxied default client.
+func TestDefaultSourcemapClient_ProxyRefusesRedirects(t *testing.T) {
+	proxyURL, err := url.Parse("http://127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+
+	client := defaultSourcemapClient(false, httpx.ProxyConfig{URL: proxyURL})
+	if client.CheckRedirect == nil {
+		t.Fatal("proxied defaultSourcemapClient must set CheckRedirect (parity with the non-proxy branch), got nil — redirects will be followed, enabling SSRF-via-redirect")
+	}
+	if err := client.CheckRedirect(&http.Request{}, nil); err == nil {
+		t.Error("proxied client's CheckRedirect must refuse the redirect (return an error), like noFollowRedirects does")
+	}
+}

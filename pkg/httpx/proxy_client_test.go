@@ -403,3 +403,98 @@ func TestProxyDialer_UnsupportedScheme(t *testing.T) {
 	_, err = ProxyDialer(ProxyConfig{URL: proxyURL})
 	assert.Error(t, err, "an unsupported proxy scheme must be rejected")
 }
+
+// TestProxyDialer_RejectsCRLFInAddr is a regression test for a CRLF-injection
+// gap (LAB-4993 review): connectDialer builds the CONNECT request via
+// fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", addr, addr) with no
+// validation that addr is free of "\r\n". An addr containing CRLF lets an
+// attacker inject extra header lines (or a second smuggled request) into the
+// bytes written to the proxy connection.
+//
+// The stub "proxy" below is deliberately naive: it replies "200 Connection
+// established" without inspecting the request at all. So a *successful*
+// ProxyDialer round-trip against it can only mean the client happily wrote
+// the CRLF-laden addr onto the wire — proving no client-side validation
+// exists. Once addr validation is added, ProxyDialer must reject the target
+// before ever dialing/writing, so the call fails locally instead.
+func TestProxyDialer_RejectsCRLFInAddr(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()                                                //nolint:errcheck,gosec // test cleanup
+		conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")) //nolint:errcheck,gosec // test best-effort: naive proxy accepts anything
+	}()
+
+	proxyURL, err := url.Parse("http://" + ln.Addr().String())
+	require.NoError(t, err)
+
+	dial, err := ProxyDialer(ProxyConfig{URL: proxyURL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, dialErr := dial(ctx, "evil\r\nHost: injected:80")
+	assert.Error(t, dialErr,
+		"ProxyDialer must reject a target address containing CRLF before writing it into the CONNECT request line "+
+			"(the naive stub proxy accepts anything, so a nil error here proves the CRLF payload went out unvalidated)")
+}
+
+// TestProxyDialer_ConnectResponseRespectsContextDeadline is a regression test
+// for an unbounded-read gap (LAB-4993 review, LOW): connectDialer's read of
+// the CONNECT response (http.ReadResponse(br, ...)) is never wired to ctx —
+// no SetReadDeadline derived from ctx, no goroutine closing conn on
+// ctx.Done(). A proxy that completes the TCP handshake but never sends a
+// status line therefore hangs the dial indefinitely, ignoring the caller's
+// context deadline entirely.
+//
+// The stub "proxy" here accepts the connection and then sits silent past the
+// test's own bound, simulating exactly that. The dial call runs in a
+// goroutine so this test itself cannot hang forever even while the
+// production bug is present; the outer select's time.After is the test's own
+// deterministic ceiling, independent of whether ctx is honored.
+func TestProxyDialer_ConnectResponseRespectsContextDeadline(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+		// Deliberately never write a response; hold the connection open well
+		// past this test's own bound to simulate a slow/malicious proxy.
+		time.Sleep(5 * time.Second)
+	}()
+
+	proxyURL, err := url.Parse("http://" + ln.Addr().String())
+	require.NoError(t, err)
+
+	dial, err := ProxyDialer(ProxyConfig{URL: proxyURL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, dialErr := dial(ctx, "127.0.0.1:1")
+		done <- dialErr
+	}()
+
+	select {
+	case dialErr := <-done:
+		assert.Error(t, dialErr, "dial must fail once the context deadline is exceeded, not hang past it")
+	case <-time.After(2 * time.Second):
+		t.Fatal("ProxyDialer did not respect the context deadline while waiting for the CONNECT response; " +
+			"it hung well past ctx cancellation (no SetReadDeadline / ctx.Done() wiring on the response read)")
+	}
+}
