@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -344,7 +345,7 @@ func startSOCKS5TestServer(t *testing.T) (addr string, stop func()) {
 		}
 		port := int(portBuf[0])<<8 | int(portBuf[1])
 
-		targetConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
+		targetConn, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		if err != nil {
 			conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) //nolint:errcheck // test best-effort failure reply
 			return
