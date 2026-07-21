@@ -12,15 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package httpx builds proxy-aware HTTP clients and dialers shared by the probe,
-// WSDL-discovery, JS-replay, and sourcemap stages. It is a stdlib-only leaf
-// (plus golang.org/x/net/proxy for SOCKS5) and imports nothing from crawl,
-// probe, pipeline, or ssrf, so every consumer can depend on it without a cycle.
-//
-// The proxy-aware transport mirrors pkg/crawl/http_crawler.go's proxy branch:
-// with a proxy configured the client dials the proxy (commonly loopback), not
-// the target, so the dial-time SSRF guard is deliberately NOT installed. Target
-// scope stays enforced at the URL level by each consumer's own validators.
 package httpx
 
 import (
@@ -61,6 +52,14 @@ func (p ProxyConfig) Enabled() bool { return p.URL != nil }
 //
 // Precondition: p.Enabled(). Callers gate on p.Enabled() and keep their existing
 // non-proxy builder for the unproxied path (zero regression to proven paths).
+//
+// Cross-reference: pkg/crawl.newHTTPClient's proxy branch encodes the SAME
+// security-sensitive TLS-verify gate (InsecureSkipVerify only when
+// Insecure && scheme ∈ {http,https}); keep the two in lockstep if that gate ever
+// changes. They are intentionally NOT merged: this builder additionally pins
+// MinVersion TLS 1.2 and clears DialContext, whereas crawl keeps DefaultTransport's
+// dialer for the proxy connection (its tests assert a non-nil proxy-branch
+// DialContext), so delegating here would regress that proven path.
 func BuildHTTPClient(p ProxyConfig, timeout time.Duration,
 	checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
 	base, ok := http.DefaultTransport.(*http.Transport)
@@ -146,53 +145,79 @@ func connectDialer(p ProxyConfig) func(ctx context.Context, addr string) (net.Co
 			return nil, err
 		}
 
-		// Bound the CONNECT handshake by the caller's context deadline so a
-		// silent/slow proxy cannot hang the dial past it. Cleared on success so
-		// it does not leak into the tunneled traffic that follows.
-		if dl, ok := ctx.Deadline(); ok {
-			if err := conn.SetDeadline(dl); err != nil {
-				// #nosec G104 -- best-effort cleanup; the conn is discarded on this error path, so a close error is unactionable.
-				conn.Close() //nolint:errcheck,gosec // best-effort cleanup on deadline-set failure
-				return nil, fmt.Errorf("httpx: setting proxy CONNECT deadline: %w", err)
+		// Interruptible handshake: a cancel-only context (context.WithCancel, no
+		// deadline) has no Deadline() for SetDeadline to bound, so without this a
+		// stalled Write/ReadResponse against a silent proxy would hang past
+		// cancellation. Watch ctx.Done() and close the conn to unblock the in-flight
+		// handshake. The watcher is stopped (close(done)) the instant the handshake
+		// finishes — success or error — so it can never close the tunnel conn we
+		// hand back. SetDeadline (inside connectHandshake) still gives clean
+		// deadline errors when the caller's context carries a deadline.
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				// #nosec G104 -- best-effort interrupt of the stalled handshake; the dial fails below.
+				conn.Close() //nolint:errcheck,gosec // unblock the handshake on cancellation
+			case <-done:
 			}
-		}
+		}()
 
-		req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", addr, addr)
-		if _, err := conn.Write([]byte(req)); err != nil {
-			// #nosec G104 -- best-effort cleanup; the conn is discarded on this error path, so a close error is unactionable.
-			conn.Close() //nolint:errcheck,gosec // best-effort cleanup on write failure
-			return nil, fmt.Errorf("httpx: writing CONNECT to proxy: %w", err)
-		}
-
-		br := bufio.NewReader(conn)
-		resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
-		if err != nil {
-			// #nosec G104 -- best-effort cleanup; the conn is discarded on this error path, so a close error is unactionable.
-			conn.Close() //nolint:errcheck,gosec // best-effort cleanup on read failure
-			return nil, fmt.Errorf("httpx: reading CONNECT response: %w", err)
-		}
-		// #nosec G104 -- CONNECT response has no body; closing an empty body cannot fail meaningfully.
-		resp.Body.Close() //nolint:errcheck,gosec // CONNECT response has no body
-		if resp.StatusCode != http.StatusOK {
-			// #nosec G104 -- best-effort cleanup; the conn is discarded on this error path, so a close error is unactionable.
-			conn.Close() //nolint:errcheck,gosec // best-effort cleanup on non-200
-			return nil, fmt.Errorf("httpx: proxy CONNECT to %s failed: %s", addr, resp.Status)
-		}
-
-		// Clear the handshake deadline so it does not apply to tunneled traffic.
-		if err := conn.SetDeadline(time.Time{}); err != nil {
-			// #nosec G104 -- best-effort cleanup; the conn is discarded on this error path, so a close error is unactionable.
-			conn.Close() //nolint:errcheck,gosec // best-effort cleanup on deadline-clear failure
-			return nil, fmt.Errorf("httpx: clearing proxy CONNECT deadline: %w", err)
+		br, handshakeErr := connectHandshake(ctx, conn, addr)
+		close(done)
+		if handshakeErr != nil {
+			// #nosec G104 -- best-effort cleanup; the conn is discarded on this error path (handshake failed or ctx canceled).
+			conn.Close() //nolint:errcheck,gosec // discard the conn on handshake failure
+			return nil, handshakeErr
 		}
 
 		// Preserve any bytes the proxy pipelined past the CONNECT reply so the
-		// caller's TLS handshake does not lose them.
+		// caller's TLS handshake does not lose them. NOTE: resp.Body is
+		// deliberately NOT closed on the 200 path — matching net/http's Transport,
+		// which never closes the body of a successful CONNECT: a hostile or
+		// misconfigured proxy that declares a body would otherwise have Close()'s
+		// drain (io.Copy) consume the caller's first tunneled bytes (SEC-BE-003).
 		if br.Buffered() > 0 {
 			return &bufferedConn{r: br, Conn: conn}, nil
 		}
 		return conn, nil
 	}
+}
+
+// connectHandshake performs the CONNECT request/response exchange on conn (an
+// already-dialed proxy connection) and returns the buffered reader positioned
+// just past the "200 Connection established" reply. When the caller's context
+// carries a deadline it bounds the exchange via conn.SetDeadline (clean deadline
+// errors) and clears it on success so it does not leak into tunneled traffic;
+// cancellation of a deadline-less context is handled by the ctx.Done() watcher
+// in connectDialer. resp.Body is intentionally left unclosed (see connectDialer)
+// so a declared-body reply cannot drain the tunnel.
+func connectHandshake(ctx context.Context, conn net.Conn, addr string) (*bufio.Reader, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(dl); err != nil {
+			return nil, fmt.Errorf("httpx: setting proxy CONNECT deadline: %w", err)
+		}
+	}
+
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", addr, addr)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		return nil, fmt.Errorf("httpx: writing CONNECT to proxy: %w", err)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		return nil, fmt.Errorf("httpx: reading CONNECT response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("httpx: proxy CONNECT to %s failed: %s", addr, resp.Status)
+	}
+
+	// Clear the handshake deadline so it does not apply to tunneled traffic.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("httpx: clearing proxy CONNECT deadline: %w", err)
+	}
+	return br, nil
 }
 
 // dialProxy opens the transport connection to the proxy itself: TLS for an

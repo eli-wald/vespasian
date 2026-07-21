@@ -661,3 +661,124 @@ func TestProxyDialer_HTTPSProxy_VerifiesCertByDefault(t *testing.T) {
 	assert.True(t, strings.Contains(lower, "certificate") || strings.Contains(lower, "x509"),
 		"expected a certificate-verification error, got: %v", dialErr)
 }
+
+// ---------------------------------------------------------------------------
+// PR #186 review findings (LAB-4993)
+// ---------------------------------------------------------------------------
+
+// TestProxyDialer_ConnectHandshakeRespectsContextCancel is a regression test
+// for TEST-001/SEC-BE-002: connectDialer only calls
+// conn.SetDeadline(ctx.Deadline()) — a deadline-based bound. A cancel-only
+// context (context.WithCancel, no deadline) has no Deadline() at all, so
+// nothing unblocks a stalled handshake when the caller cancels; the dial
+// hangs until the underlying TCP connection itself times out or the process
+// exits. The stub proxy below accepts the TCP connection and then goes
+// silent forever (never writes a status line), so only ctx.Done()-driven
+// cancellation (not a deadline) can end the dial.
+func TestProxyDialer_ConnectHandshakeRespectsContextCancel(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+		// Stay silent forever; never write a CONNECT response status line.
+		<-make(chan struct{})
+	}()
+
+	proxyURL, err := url.Parse("http://" + ln.Addr().String())
+	require.NoError(t, err)
+
+	dial, err := ProxyDialer(ProxyConfig{URL: proxyURL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background()) // NO deadline
+
+	done := make(chan error, 1)
+	go func() {
+		_, dialErr := dial(ctx, "127.0.0.1:1")
+		done <- dialErr
+	}()
+
+	// Cancel shortly after the dial starts, from a separate goroutine.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	select {
+	case dialErr := <-done:
+		assert.Error(t, dialErr, "dial must fail promptly once ctx is canceled, even with no deadline set")
+	case <-time.After(2 * time.Second):
+		t.Fatal("ProxyDialer did not respect ctx cancellation (no deadline) while waiting for the CONNECT response; " +
+			"it hung well past cancel() — connectDialer only wires ctx.Deadline(), not ctx.Done()")
+	}
+}
+
+// TestProxyDialer_ConnectPreservesPipelinedBytes is a regression test for
+// TEST-002/SEC-BE-003/QUAL-004: the stub CONNECT proxy below writes the "200
+// Connection established" status line AND target payload bytes in the SAME
+// write, so http.ReadResponse's bufio.Reader buffers bytes past the response
+// (br.Buffered() > 0). The tunnel's first bytes must not be silently dropped
+// (e.g. by a regression that drains/discards the buffered reader instead of
+// wrapping it): the returned conn must be a *bufferedConn, and reading from it
+// must yield the pipelined payload intact.
+func TestProxyDialer_ConnectPreservesPipelinedBytes(t *testing.T) {
+	const pipelinedPayload = "PIPELINED-PAYLOAD"
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+
+		reader := bufio.NewReader(conn)
+		if _, err := reader.ReadString('\n'); err != nil { // CONNECT request line
+			return
+		}
+		for { // drain headers until the blank line
+			line, err := reader.ReadString('\n')
+			if err != nil || line == "\r\n" || line == "\n" {
+				break
+			}
+		}
+
+		// Status line + pipelined target bytes in ONE write, so the client's
+		// bufio.Reader ends up with buffered bytes past the response.
+		reply := "HTTP/1.1 200 Connection established\r\n\r\n" + pipelinedPayload
+		if _, err := conn.Write([]byte(reply)); err != nil {
+			return
+		}
+		// Keep the connection open briefly so the client can read before we exit.
+		time.Sleep(200 * time.Millisecond)
+	}()
+
+	proxyURL, err := url.Parse("http://" + ln.Addr().String())
+	require.NoError(t, err)
+
+	dial, err := ProxyDialer(ProxyConfig{URL: proxyURL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := dial(ctx, "127.0.0.1:1")
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck // test cleanup
+
+	_, ok := conn.(*bufferedConn)
+	require.True(t, ok, "expected the returned conn to be a *bufferedConn when the proxy pipelines bytes past the CONNECT response, got %T", conn)
+
+	buf := make([]byte, len(pipelinedPayload))
+	_, err = io.ReadFull(conn, buf)
+	require.NoError(t, err)
+	assert.Equal(t, pipelinedPayload, string(buf), "the tunnel's first bytes must be the pipelined payload, not dropped/drained")
+}
