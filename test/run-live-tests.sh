@@ -2916,16 +2916,17 @@ test_no_download() {
     fi
 
     log_info "Running headless crawl to assert no browser download..."
+    local crawl_ok=true
     if ! ( export HOME="$iso_home"; crawl_backend "$base_url" "${target_dir}/capture.json" true --depth 1 --max-pages 5 --timeout 2m ); then
-        # A launch failure (e.g. Chrome unlaunchable) is not a download; degrade
-        # to skip rather than a false failure, matching the other rod targets.
-        log_warn "no-download: headless crawl failed (Chrome may be unlaunchable), skipping"
-        set_test_result "no-download" "SKIP" "-" "-" "$((SECONDS - start))"
-        return 0
+        crawl_ok=false
     fi
 
-    # The freshly-wiped isolated cache must still be empty: a correct system-Chrome
-    # pin never writes it; any chromium-<rev> means go-rod downloaded a browser.
+    # Inspect the cache regardless of crawl outcome, and BEFORE deciding to skip.
+    # A browser download leaves a chromium-<rev> entry even if the crawl later
+    # fails: under the LAB-4732 block-mode egress this PR unblocks, a regressed
+    # pin fails *because* the blocked download errored out — i.e. the crawl
+    # failure IS the regression this guard exists to catch. Checking the cache
+    # first means a download attempt is a hard FAIL, never a masked SKIP.
     local downloaded
     downloaded=$(ls -A "$rod_cache" 2>/dev/null || true)
     if [ -n "$downloaded" ]; then
@@ -2933,6 +2934,15 @@ test_no_download() {
         log_info "rod cache contents: [${downloaded}]"
         set_test_result "no-download" "FAIL" "-" "-" "$((SECONDS - start))"
         return 1
+    fi
+
+    # Cache is empty. A failed crawl with no download attempt is a genuine launch
+    # failure (e.g. Chrome unlaunchable in this environment), not a pin regression
+    # — degrade to skip rather than a false failure, matching the other rod targets.
+    if [ "$crawl_ok" = false ]; then
+        log_warn "no-download: headless crawl failed with an empty rod cache (Chrome may be unlaunchable; no download attempted), skipping"
+        set_test_result "no-download" "SKIP" "-" "-" "$((SECONDS - start))"
+        return 0
     fi
 
     log_ok "No browser download detected; system Chrome was used"
