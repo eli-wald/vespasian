@@ -30,6 +30,12 @@ import (
 // tests can exercise the no-browser-found path deterministically regardless of
 // what is installed on the host (go-rod uses the same "interface for testing"
 // idiom for its own exec calls). Production code always uses launcher.LookPath.
+//
+// NOT PARALLEL-SAFE: tests swap this via a t.Cleanup-restored pattern (see
+// stubLookPath in browser_test.go) and MUST NOT call t.Parallel() — concurrent
+// swaps would race on the global. No sync is used here because the production
+// read path runs once per launcher configuration and the test swap happens
+// before the call under test.
 var browserLookPath = launcher.LookPath
 
 // BrowserOptions configures Chrome launch parameters.

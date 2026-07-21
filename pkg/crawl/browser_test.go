@@ -108,6 +108,24 @@ func TestConfigureLauncher(t *testing.T) {
 				t.Errorf("error %q should mention proxy", err.Error())
 			}
 		})
+		// Pin the proxy-validation-before-binary-pinning ordering deterministically:
+		// with NO system browser resolvable, an invalid proxy must still surface as a
+		// proxy error, not a "no system Chrome" error. Without stubbing LookPath this
+		// guard would be host-dependent (a host with Chrome installed would let a
+		// reverted pin-first ordering pass anyway). See configureLauncher's ordering note.
+		t.Run("invalid proxy errors before binary pinning even with no browser", func(t *testing.T) {
+			stubLookPath(t, "", false)
+			_, err := configureLauncher(BrowserOptions{Proxy: "not a valid proxy"})
+			if err == nil {
+				t.Fatal("expected error for invalid proxy, got nil")
+			}
+			if !strings.Contains(err.Error(), "proxy") {
+				t.Errorf("error %q should be the proxy-validation error", err.Error())
+			}
+			if strings.Contains(err.Error(), "system Chrome") {
+				t.Errorf("proxy validation must run before binary pinning; got binary-pin error: %v", err)
+			}
+		})
 	})
 
 	t.Run("chrome path", func(t *testing.T) {
