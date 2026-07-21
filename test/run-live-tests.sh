@@ -2916,17 +2916,18 @@ test_no_download() {
     fi
 
     log_info "Running headless crawl to assert no browser download..."
+    # Capture merged stdout+stderr (crawl_backend already does 2>&1) so the
+    # skip-vs-fail decision below can inspect what go-rod actually did, not just
+    # whether the crawl exited zero.
+    local crawl_log="${target_dir}/crawl.log"
     local crawl_ok=true
-    if ! ( export HOME="$iso_home"; crawl_backend "$base_url" "${target_dir}/capture.json" true --depth 1 --max-pages 5 --timeout 2m ); then
+    if ! ( export HOME="$iso_home"; crawl_backend "$base_url" "${target_dir}/capture.json" true --depth 1 --max-pages 5 --timeout 2m ) >"$crawl_log" 2>&1; then
         crawl_ok=false
     fi
 
-    # Inspect the cache regardless of crawl outcome, and BEFORE deciding to skip.
-    # A browser download leaves a chromium-<rev> entry even if the crawl later
-    # fails: under the LAB-4732 block-mode egress this PR unblocks, a regressed
-    # pin fails *because* the blocked download errored out — i.e. the crawl
-    # failure IS the regression this guard exists to catch. Checking the cache
-    # first means a download attempt is a hard FAIL, never a masked SKIP.
+    # Detection 1 — audit egress (download succeeds): go-rod writes the managed
+    # Chromium into the freshly-wiped isolated cache. A correct system-Chrome pin
+    # never writes it; any chromium-<rev> means go-rod downloaded a browser.
     local downloaded
     downloaded=$(ls -A "$rod_cache" 2>/dev/null || true)
     if [ -n "$downloaded" ]; then
@@ -2936,11 +2937,32 @@ test_no_download() {
         return 1
     fi
 
-    # Cache is empty. A failed crawl with no download attempt is a genuine launch
-    # failure (e.g. Chrome unlaunchable in this environment), not a pin regression
-    # — degrade to skip rather than a false failure, matching the other rod targets.
+    # Detection 2 — block egress (download blocked): under the LAB-4732
+    # egress-policy: block this PR unblocks, a regressed pin makes go-rod TRY to
+    # fetch a managed Chromium, but fetchup's FastestURL() finds no reachable
+    # mirror, returns ErrNoURLs, and Download() (the only cache-writing code) is
+    # never reached — so the cache stays empty and the crawl fails. Detection 1
+    # alone would mask this as a SKIP. These markers are emitted ONLY when go-rod
+    # takes the auto-download path (i.e. .Bin was empty = pin regressed): the
+    # Download() error wrap, fetchup's ErrNoURLs, go-rod's download logger prefix,
+    # and the third-party mirror hosts. None appear on a normal pinned crawl.
+    if grep -qiE "can't find a browser binary for your OS|Not able to find a valid URL to download|\[launcher\.Browser\]|storage\.googleapis\.com|registry\.npmmirror\.com|playwright\.(azureedge\.net|download)" "$crawl_log"; then
+        log_fail "go-rod attempted a browser download during the crawl — LAB-4999 pin regressed (download blocked by egress policy)"
+        log_info "matching crawl output:"
+        grep -iE "can't find a browser binary for your OS|Not able to find a valid URL to download|\[launcher\.Browser\]|storage\.googleapis\.com|registry\.npmmirror\.com|playwright\.(azureedge\.net|download)" "$crawl_log" | head -5
+        set_test_result "no-download" "FAIL" "-" "-" "$((SECONDS - start))"
+        return 1
+    fi
+
+    # Neither detection tripped: the cache is empty AND go-rod never took the
+    # download path. A crawl failure here is a genuine launch failure (Chrome
+    # unlaunchable in this environment, or the correct "no system Chrome" refusal
+    # when no browser is installed), not a pin regression — degrade to skip,
+    # matching the other rod targets.
     if [ "$crawl_ok" = false ]; then
-        log_warn "no-download: headless crawl failed with an empty rod cache (Chrome may be unlaunchable; no download attempted), skipping"
+        log_warn "no-download: headless crawl failed with no download attempt (Chrome may be unlaunchable), skipping"
+        log_info "crawl output tail:"
+        tail -n 5 "$crawl_log" 2>/dev/null || true
         set_test_result "no-download" "SKIP" "-" "-" "$((SECONDS - start))"
         return 0
     fi
