@@ -17,9 +17,16 @@ package httpx
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -497,4 +504,160 @@ func TestProxyDialer_ConnectResponseRespectsContextDeadline(t *testing.T) {
 		t.Fatal("ProxyDialer did not respect the context deadline while waiting for the CONNECT response; " +
 			"it hung well past ctx cancellation (no SetReadDeadline / ctx.Done() wiring on the response read)")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// https-scheme proxy (dialProxy's TLS-to-the-proxy branch) — LAB-4993 coverage
+// ---------------------------------------------------------------------------
+
+// selfSignedProxyCert generates a fresh, in-memory self-signed certificate
+// valid for 127.0.0.1, mirroring pkg/probe/grpc_test.go's selfSignedTLSConfig.
+func selfSignedProxyCert(t *testing.T) tls.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  key,
+	}
+}
+
+// startTLSRecordingCONNECTProxy starts a TLS-listening (self-signed cert) HTTP
+// CONNECT proxy that records the requested target, replies "200 Connection
+// established", then relays bytes to targetAddr. Mirrors
+// startRecordingCONNECTProxy but over a TLS listener, exercising dialProxy's
+// https branch (proxy_client.go:193-210: tls.Dialer to the proxy itself) —
+// every other CONNECT-proxy test in this file uses a plain-TCP http:// proxy,
+// leaving that branch uncovered.
+func startTLSRecordingCONNECTProxy(t *testing.T, targetAddr string) (addr string, recordedTarget func() string, stop func()) {
+	t.Helper()
+	cert := selfSignedProxyCert(t)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}}) //nolint:gosec // test cert
+	require.NoError(t, err)
+
+	var recorded atomic.Value // string
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+
+		reader := bufio.NewReader(conn)
+		reqLine, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		fields := strings.Fields(reqLine)
+		if len(fields) >= 2 && fields[0] == "CONNECT" {
+			recorded.Store(fields[1])
+		}
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil || line == "\r\n" || line == "\n" {
+				break
+			}
+		}
+
+		if _, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
+			return
+		}
+
+		targetConn, err := net.Dial("tcp", targetAddr)
+		if err != nil {
+			return
+		}
+		defer targetConn.Close() //nolint:errcheck // test cleanup
+
+		done := make(chan struct{})
+		go func() {
+			io.Copy(targetConn, reader) //nolint:errcheck,gosec // test tunnel copy
+			close(done)
+		}()
+		io.Copy(conn, targetConn) //nolint:errcheck,gosec // test tunnel copy
+		<-done
+	}()
+
+	return ln.Addr().String(),
+		func() string {
+			v, _ := recorded.Load().(string)
+			return v
+		},
+		func() { ln.Close() } //nolint:errcheck,gosec // test cleanup
+}
+
+// TestProxyDialer_HTTPSProxy_ConnectTunnel proves the https-scheme proxy path
+// works end-to-end: dialProxy TLS-dials the proxy itself (Insecure=true opts
+// into accepting the proxy's self-signed cert, mirroring an intercepting MITM
+// proxy), the CONNECT tunnel establishes, and bytes round-trip to the real
+// target through it.
+func TestProxyDialer_HTTPSProxy_ConnectTunnel(t *testing.T) {
+	targetAddr, stopTarget := startTCPEchoServer(t)
+	defer stopTarget()
+
+	proxyAddr, recordedTarget, stopProxy := startTLSRecordingCONNECTProxy(t, targetAddr)
+	defer stopProxy()
+
+	proxyURL, err := url.Parse("https://" + proxyAddr)
+	require.NoError(t, err)
+
+	dial, err := ProxyDialer(ProxyConfig{URL: proxyURL, Insecure: true})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := dial(ctx, targetAddr)
+	require.NoError(t, err, "dialing an https-scheme CONNECT proxy with Insecure=true (self-signed cert) must succeed")
+	defer conn.Close() //nolint:errcheck // test cleanup
+
+	_, err = conn.Write([]byte("hello"))
+	require.NoError(t, err)
+	buf := make([]byte, 5)
+	_, err = io.ReadFull(conn, buf)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(buf), "expected the echo server's reply through the https-proxy tunnel")
+
+	assert.Equal(t, targetAddr, recordedTarget(), "https-scheme proxy must have recorded a CONNECT to the target address")
+}
+
+// TestProxyDialer_HTTPSProxy_VerifiesCertByDefault covers the verify-on branch
+// of dialProxy: without the Insecure opt-in, dialing an https-scheme proxy
+// presenting a self-signed certificate must fail with a certificate-
+// verification error rather than silently succeeding.
+func TestProxyDialer_HTTPSProxy_VerifiesCertByDefault(t *testing.T) {
+	targetAddr, stopTarget := startTCPEchoServer(t)
+	defer stopTarget()
+
+	proxyAddr, _, stopProxy := startTLSRecordingCONNECTProxy(t, targetAddr)
+	defer stopProxy()
+
+	proxyURL, err := url.Parse("https://" + proxyAddr)
+	require.NoError(t, err)
+
+	dial, err := ProxyDialer(ProxyConfig{URL: proxyURL, Insecure: false})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, dialErr := dial(ctx, targetAddr)
+	require.Error(t, dialErr, "dialing an https-scheme proxy with a self-signed cert must fail when Insecure=false (verify by default)")
+	lower := strings.ToLower(dialErr.Error())
+	assert.True(t, strings.Contains(lower, "certificate") || strings.Contains(lower, "x509"),
+		"expected a certificate-verification error, got: %v", dialErr)
 }
