@@ -57,14 +57,27 @@ type BrowserManager struct {
 	cleanupOnce sync.Once
 }
 
+// vespasianEnablesNoSandbox reports whether Vespasian's own configuration opts
+// into disabling Chrome's OS-level sandbox — either explicitly via
+// BrowserOptions.NoSandbox or via the VESPASIAN_NO_SANDBOX env var (set by CI
+// workflows). It is the single source of truth for that decision; both
+// configureLauncher and browser_test.go consult it. Keeping the decision in a
+// self-contained helper lets the test assert Vespasian's contribution
+// directly, which stays deterministic even where go-rod's launcher.New() adds
+// --no-sandbox by default in containers and masks the launcher-observed flag
+// (LAB-4994).
+func vespasianEnablesNoSandbox(opts BrowserOptions) bool {
+	return opts.NoSandbox || os.Getenv("VESPASIAN_NO_SANDBOX") == "true"
+}
+
 // configureLauncher applies BrowserOptions to a new launcher without
-// launching Chrome. Disables the sandbox when opts.NoSandbox is set or
-// when the VESPASIAN_NO_SANDBOX env var is "true" (set by CI workflows).
+// launching Chrome. Disables the sandbox when vespasianEnablesNoSandbox opts
+// in (see its doc for the exact condition).
 func configureLauncher(opts BrowserOptions) (*launcher.Launcher, error) {
 	l := launcher.New().
 		Headless(opts.Headless)
 
-	if opts.NoSandbox || os.Getenv("VESPASIAN_NO_SANDBOX") == "true" {
+	if vespasianEnablesNoSandbox(opts) {
 		l = l.NoSandbox(true)
 	}
 	if opts.ChromePath != "" {
