@@ -403,12 +403,9 @@ func (c *CrawlCmd) Run() error {
 		fmt.Fprintf(os.Stderr, "captured %d requests\n", len(requests)) //nolint:gosec // G705: writing to stderr, not web response
 	}
 
-	// c.Proxy was validated fail-fast by doCrawl above, so a parse error here is
-	// unreachable in the normal flow; fall back to no proxy defensively.
-	crawlProxy, err := parseProxyConfig(c.Proxy, c.ProxyInsecure)
-	if err != nil {
-		crawlProxy = httpx.ProxyConfig{}
-	}
+	// c.Proxy was validated fail-fast by doCrawl above; on the (unreachable) error
+	// parseProxyConfigOrEmpty falls back to no proxy.
+	crawlProxy := parseProxyConfigOrEmpty(c.Proxy, c.ProxyInsecure)
 	// NOTE: running `crawl` (with --analyze-js) followed by `generate` (also
 	// with --analyze-js, the default) does NOT re-analyze the same JS bundles.
 	// AnalyzeJS's idempotency guard (crawl.AnyStaticSource) detects the
@@ -498,12 +495,9 @@ const maxCaptureSize = 100 * 1024 * 1024
 // dropped assignment) without executing Run().
 func (c *GenerateCmd) options() pipeline.Options {
 	// --proxy is validated fail-fast in Run (via resolveJSReplayConfig) before
-	// options() is reached, so a parse error here is unreachable in the normal
-	// flow; fall back to no proxy defensively.
-	proxy, err := parseProxyConfig(c.Proxy, c.ProxyInsecure)
-	if err != nil {
-		proxy = httpx.ProxyConfig{}
-	}
+	// options() is reached; parseProxyConfigOrEmpty falls back to no proxy on the
+	// (unreachable) error.
+	proxy := parseProxyConfigOrEmpty(c.Proxy, c.ProxyInsecure)
 	return pipeline.Options{
 		APIType:                c.APIType,
 		Confidence:             c.Confidence,
@@ -651,12 +645,9 @@ type ScanCmd struct {
 // in by Run().
 func (c *ScanCmd) scanOptions(apiType string, afterWSDL func(ctx context.Context, reqs []crawl.ObservedRequest) []crawl.ObservedRequest) pipeline.ScanOptions {
 	// --proxy (from the embedded CrawlOptions) is validated fail-fast by doCrawl
-	// during the crawl stage before scanOptions() is reached, so a parse error
-	// here is unreachable in the normal flow; fall back to no proxy defensively.
-	proxy, err := parseProxyConfig(c.Proxy, c.ProxyInsecure)
-	if err != nil {
-		proxy = httpx.ProxyConfig{}
-	}
+	// during the crawl stage before scanOptions() is reached; parseProxyConfigOrEmpty
+	// falls back to no proxy on the (unreachable) error.
+	proxy := parseProxyConfigOrEmpty(c.Proxy, c.ProxyInsecure)
 	return pipeline.ScanOptions{
 		TargetURL:              c.URL,
 		APIType:                apiType,
@@ -716,13 +707,11 @@ func (c *ScanCmd) Run() error { //nolint:gocyclo // top-level orchestration
 		fmt.Fprintf(os.Stderr, "captured %d requests\n", len(requests)) //nolint:gosec // G705: writing to stderr, not web response
 	}
 
-	// c.Proxy was validated fail-fast by doCrawl above (crawl stage), so a parse
-	// error here is unreachable in the normal flow; fall back to no proxy. Reused
-	// for both the sourcemap-fetch (Augment) and JS-replay (afterWSDL) stages.
-	scanProxy, err := parseProxyConfig(c.Proxy, c.ProxyInsecure)
-	if err != nil {
-		scanProxy = httpx.ProxyConfig{}
-	}
+	// Parse --proxy ONCE here (validated fail-fast by doCrawl above) and reuse the
+	// result across every post-crawl stage: sourcemap-fetch (Augment), JS-replay
+	// (afterWSDL), and probe/WSDL (scanOptions). parseProxyConfigOrEmpty falls back
+	// to no proxy on the (unreachable) error.
+	scanProxy := parseProxyConfigOrEmpty(c.Proxy, c.ProxyInsecure)
 
 	// Augment captured requests with static-HTML form analysis + JS bundle
 	// static analysis in the canonical forms-then-jsstatic order (see
@@ -870,6 +859,22 @@ func parseProxyConfig(addr string, insecure bool) (httpx.ProxyConfig, error) {
 		return httpx.ProxyConfig{}, fmt.Errorf("invalid --proxy address %q: %w", addr, err)
 	}
 	return httpx.ProxyConfig{URL: u, Insecure: insecure}, nil
+}
+
+// parseProxyConfigOrEmpty parses addr/insecure and returns the resulting
+// httpx.ProxyConfig, falling back to the zero (disabled) config on error. It
+// encapsulates the fail-safe used by the post-crawl builders (CrawlCmd.Run,
+// GenerateCmd.options, ScanCmd.Run): each command validates --proxy fail-fast
+// earlier in its Run (generate via resolveJSReplayConfig; crawl/scan via
+// doCrawl), so a parse error here is unreachable in the normal flow and the
+// fallback only guards that (already-rejected) case. Fail-fast validation is
+// intentionally NOT done here — that stays at the per-command entry points.
+func parseProxyConfigOrEmpty(addr string, insecure bool) httpx.ProxyConfig {
+	cfg, err := parseProxyConfig(addr, insecure)
+	if err != nil {
+		return httpx.ProxyConfig{}
+	}
+	return cfg
 }
 
 // warnProxyNoPort writes a warning to stderr when a non-empty proxy address has
