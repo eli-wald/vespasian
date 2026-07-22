@@ -27,8 +27,9 @@
 // [BrowserOptions.ChromePath] when set, otherwise the system browser resolved
 // by go-rod's launcher.LookPath. It does not, by default, let go-rod
 // auto-download a Chromium from third-party mirrors (a supply-chain risk and a
-// source of nondeterministic egress). When no system browser is found it errors, unless
-// downloads are explicitly opted in via [BrowserOptions.AllowBrowserDownload]
+// source of nondeterministic egress). When no system browser is found it
+// errors, unless downloads are explicitly opted in via
+// [BrowserOptions.AllowBrowserDownload]
 // or the VESPASIAN_ALLOW_BROWSER_DOWNLOAD=true environment variable (intended
 // for local dev on platforms without a system Chrome). The launcher also sets
 // Chrome telemetry/phone-home-disabling flags so crawl egress stays minimal.
