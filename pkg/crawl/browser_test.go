@@ -246,6 +246,12 @@ func TestConfigureLauncher(t *testing.T) {
 				l, err := configureLauncher(BrowserOptions{})
 				if err == nil {
 					t.Errorf("env %q: expected no-system-Chrome error, got nil", v)
+				} else if !strings.Contains(err.Error(), "VESPASIAN_ALLOW_BROWSER_DOWNLOAD") {
+					// Pin the default-deny guard to the pin-refusal error (which
+					// names the opt-in env var), matching the sibling opt-in
+					// subtest, so a future unrelated early error can't mask a
+					// truthy-parsing regression.
+					t.Errorf("env %q: error %q should name the opt-in env var", v, err.Error())
 				}
 				if l != nil {
 					t.Errorf("env %q: expected nil launcher on error", v)
@@ -327,6 +333,11 @@ func TestValidateProxyAddr(t *testing.T) {
 		{"missing scheme", "127.0.0.1:8080", true, "invalid proxy address"},
 		{"ftp scheme", "ftp://proxy:21", true, "scheme must be"},
 		{"empty host", "http://", true, "missing host"},
+		// url.Parse failure with no '@': exercises the parse-error branch the
+		// credential-'@' rewrite now sits in front of. The "address:" (colon
+		// immediately after "address") substring appears only in the parse-error
+		// message, not the quoted scheme/host ones, so it pins that branch.
+		{"unparseable url no creds", "http://[::1", true, "invalid proxy address:"},
 		{"embedded credentials", "http://user:pass@127.0.0.1:8080", true, "embedded credentials"},
 		{"embedded user only", "http://user@127.0.0.1:8080", true, "embedded credentials"},
 		{"scheme-less credentials", "user:pass@127.0.0.1:8080", true, "embedded credentials"},
