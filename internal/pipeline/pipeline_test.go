@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -371,7 +372,13 @@ func restRequestsForOrigin(origin string) []crawl.ObservedRequest {
 // newRecordingProxy starts a forwarding httptest proxy that increments a
 // counter for every request it forwards. Modeled on
 // pkg/crawl/http_crawler_test.go:195.
-func newRecordingProxy(t *testing.T) (proxy *httptest.Server, hits *atomic.Int64) {
+//
+// When forwardBody is false, only the upstream status code is relayed (the
+// original behavior: sufficient for callers that just assert hits > 0 or
+// need a valid status/spec from the probe stage). When forwardBody is true,
+// response headers and the response body are also copied through — required
+// by callers (e.g. WSDL discovery) that must actually read proxied content.
+func newRecordingProxy(t *testing.T, forwardBody bool) (proxy *httptest.Server, hits *atomic.Int64) {
 	t.Helper()
 	hits = &atomic.Int64{}
 	proxy = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -387,7 +394,17 @@ func newRecordingProxy(t *testing.T) (proxy *httptest.Server, hits *atomic.Int64
 			return
 		}
 		defer resp.Body.Close() //nolint:errcheck // test cleanup
+		if forwardBody {
+			for k, vs := range resp.Header {
+				for _, v := range vs {
+					w.Header().Add(k, v)
+				}
+			}
+		}
 		w.WriteHeader(resp.StatusCode)
+		if forwardBody {
+			_, _ = io.Copy(w, resp.Body) //nolint:errcheck,gosec // test proxy
+		}
 	}))
 	t.Cleanup(proxy.Close)
 	return proxy, hits
@@ -419,7 +436,7 @@ func optionsOrigin(t *testing.T) *httptest.Server {
 // pkg/crawl/http_crawler_test.go:195 and TestClassifyProbeGenerate_GRPCInsecureSkipVerify.
 func TestClassifyProbeGenerate_ProxyReachesProbe(t *testing.T) {
 	origin := optionsOrigin(t)
-	proxy, hits := newRecordingProxy(t)
+	proxy, hits := newRecordingProxy(t, false)
 
 	proxyURL, err := url.Parse(proxy.URL)
 	require.NoError(t, err)
@@ -446,7 +463,7 @@ func TestClassifyProbeGenerate_ProxyReachesProbe(t *testing.T) {
 // directly and the recording proxy would see zero hits.
 func TestClassifyProbeGenerate_ProxyAndAllowPrivate_ProxyWins(t *testing.T) {
 	origin := optionsOrigin(t)
-	proxy, hits := newRecordingProxy(t)
+	proxy, hits := newRecordingProxy(t, false)
 
 	proxyURL, err := url.Parse(proxy.URL)
 	require.NoError(t, err)

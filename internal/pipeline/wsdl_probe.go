@@ -37,6 +37,15 @@ func writeStatus(w io.Writer, format string, args ...any) {
 	fmt.Fprintf(w, format, args...) //nolint:errcheck,gosec // best-effort status output
 }
 
+// noFollowRedirects is the pipeline package's shared redirect policy: return
+// http.ErrUseLastResponse so the caller sees the redirect response itself rather
+// than following it. Mirrors probe.probeRedirectPolicy; referenced by
+// buildWSDLProbeClient (both branches) and the ClassifyProbeGenerate
+// allow-private client so the WSDL/probe redirect posture lives in one place.
+func noFollowRedirects(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
 // wsdlStageTimeout caps each connection phase (TLS handshake, response header)
 // independently of the overall Client.Timeout, so a slow or malicious target
 // can't burn the whole budget on a single stage. Both transport branches share
@@ -50,9 +59,7 @@ const wsdlStageTimeout = 10 * time.Second
 // AllowPrivate probes elsewhere.
 func buildWSDLProbeClient(allowPrivate bool, proxy httpx.ProxyConfig) *http.Client {
 	if proxy.Enabled() {
-		return httpx.BuildHTTPClient(proxy, 15*time.Second, func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		})
+		return httpx.BuildHTTPClient(proxy, 15*time.Second, noFollowRedirects)
 	}
 	transport := &http.Transport{
 		DialContext:           probe.SSRFSafeDialContext,
@@ -66,11 +73,9 @@ func buildWSDLProbeClient(allowPrivate bool, proxy httpx.ProxyConfig) *http.Clie
 		}
 	}
 	return &http.Client{
-		Timeout:   15 * time.Second,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+		Timeout:       15 * time.Second,
+		Transport:     transport,
+		CheckRedirect: noFollowRedirects,
 	}
 }
 

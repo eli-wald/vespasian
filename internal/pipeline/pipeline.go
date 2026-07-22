@@ -128,10 +128,8 @@ func ClassifyProbeGenerate(ctx context.Context, requests []crawl.ObservedRequest
 					return d.DialContext(ctx, network, addr)
 				}
 				cfg.Client = &http.Client{
-					CheckRedirect: func(req *http.Request, via []*http.Request) error {
-						return http.ErrUseLastResponse
-					},
-					Transport: transport,
+					CheckRedirect: noFollowRedirects,
+					Transport:     transport,
 				}
 				cfg.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
 					var d net.Dialer

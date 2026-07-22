@@ -16,11 +16,7 @@ package pipeline_test
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -216,29 +212,7 @@ func TestResolveAndGenerate_UnknownTypeErrors(t *testing.T) {
 func TestResolveAndGenerate_ForwardsProxy(t *testing.T) {
 	ts := wsdlServer(t)
 
-	var hits atomic.Int64
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.RequestURI, nil) //nolint:gosec // test proxy forwards the received request URI
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		resp, err := http.DefaultTransport.RoundTrip(outReq)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close() //nolint:errcheck // test cleanup
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body) //nolint:errcheck,gosec // test proxy
-	}))
-	t.Cleanup(proxy.Close)
+	proxy, hits := newRecordingProxy(t, true)
 
 	proxyURL, err := url.Parse(proxy.URL)
 	require.NoError(t, err)

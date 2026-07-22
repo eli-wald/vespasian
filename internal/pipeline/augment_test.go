@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -350,23 +349,7 @@ func TestAnalyzeJS_ForwardsProxy(t *testing.T) {
 	}))
 	t.Cleanup(origin.Close)
 
-	var hits atomic.Int64
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.RequestURI, nil) //nolint:gosec // test proxy forwards the received request URI
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		resp, err := http.DefaultTransport.RoundTrip(outReq)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close() //nolint:errcheck // test cleanup
-		w.WriteHeader(resp.StatusCode)
-	}))
-	t.Cleanup(proxy.Close)
+	proxy, hits := newRecordingProxy(t, false)
 
 	proxyURL, err := url.Parse(proxy.URL)
 	require.NoError(t, err)
