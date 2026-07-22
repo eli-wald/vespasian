@@ -680,11 +680,17 @@ func TestProxyDialer_ConnectHandshakeRespectsContextCancel(t *testing.T) {
 	require.NoError(t, err)
 	defer ln.Close() //nolint:errcheck // test cleanup
 
+	// accepted is closed once the stub proxy has Accept()-ed the dial's
+	// connection, so the test can cancel() deterministically right after the
+	// handshake is in flight instead of guessing a wall-clock sleep duration.
+	accepted := make(chan struct{})
+
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		close(accepted)
 		defer conn.Close() //nolint:errcheck // test cleanup
 		// Stay silent forever; never write a CONNECT response status line.
 		<-make(chan struct{})
@@ -704,9 +710,10 @@ func TestProxyDialer_ConnectHandshakeRespectsContextCancel(t *testing.T) {
 		done <- dialErr
 	}()
 
-	// Cancel shortly after the dial starts, from a separate goroutine.
+	// Cancel once the proxy has accepted the connection (deterministic; no
+	// wall-clock guess about when the handshake is in flight).
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		<-accepted
 		cancel()
 	}()
 
@@ -781,4 +788,50 @@ func TestProxyDialer_ConnectPreservesPipelinedBytes(t *testing.T) {
 	_, err = io.ReadFull(conn, buf)
 	require.NoError(t, err)
 	assert.Equal(t, pipelinedPayload, string(buf), "the tunnel's first bytes must be the pipelined payload, not dropped/drained")
+}
+
+// TestProxyDialer_ConnectCancelAfterSuccessKeepsConnUsable is a regression
+// test for PR #186 round-2 finding G: connectDialer starts a goroutine that
+// watches ctx.Done() and calls conn.Close() to unblock a stalled handshake
+// (see connectDialer's ctx.Done() watcher). That watcher's select races
+// against close(done): even though close(done) happens before dial() returns
+// a successful conn, the watcher goroutine may not be scheduled until AFTER
+// the caller has already gotten the conn back and canceled ctx (e.g. via a
+// deferred cancel() or a cancel unrelated to this dial's own lifetime). If
+// ctx.Done() and done are both ready when the watcher's select finally runs,
+// Go picks between them pseudo-randomly — so a cancel that arrives strictly
+// AFTER a successful handshake can still race-close the tunnel conn that was
+// already handed to the caller. This is a regression GUARD: it may already
+// pass (that's fine), but it must stay green after any mutex-based fix that
+// makes the watcher a no-op once the handshake has completed.
+func TestProxyDialer_ConnectCancelAfterSuccessKeepsConnUsable(t *testing.T) {
+	targetAddr, stopTarget := startTCPEchoServer(t)
+	defer stopTarget()
+
+	proxyAddr, _, stopProxy := startRecordingCONNECTProxy(t, targetAddr)
+	defer stopProxy()
+
+	proxyURL, err := url.Parse("http://" + proxyAddr)
+	require.NoError(t, err)
+
+	dial, err := ProxyDialer(ProxyConfig{URL: proxyURL})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	conn, err := dial(ctx, targetAddr)
+	require.NoError(t, err, "dial must succeed before we test post-success cancellation")
+
+	// Cancel AFTER a successful handshake: this must never be able to close
+	// the tunnel conn already returned to the caller.
+	cancel()
+
+	_, err = conn.Write([]byte("hello"))
+	require.NoError(t, err, "conn must remain usable for writes after a post-success ctx cancel")
+	buf := make([]byte, 5)
+	_, err = io.ReadFull(conn, buf)
+	require.NoError(t, err, "conn must remain usable for reads after a post-success ctx cancel")
+	assert.Equal(t, "hello", string(buf), "expected the echo server's reply through the tunnel after cancel")
+
+	require.NoError(t, conn.Close())
 }

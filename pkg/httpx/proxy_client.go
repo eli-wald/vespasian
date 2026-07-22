@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -148,27 +149,55 @@ func connectDialer(p ProxyConfig) func(ctx context.Context, addr string) (net.Co
 		// Interruptible handshake: a cancel-only context (context.WithCancel, no
 		// deadline) has no Deadline() for SetDeadline to bound, so without this a
 		// stalled Write/ReadResponse against a silent proxy would hang past
-		// cancellation. Watch ctx.Done() and close the conn to unblock the in-flight
-		// handshake. The watcher is stopped (close(done)) the instant the handshake
-		// finishes — success or error — so it can never close the tunnel conn we
-		// hand back. SetDeadline (inside connectHandshake) still gives clean
-		// deadline errors when the caller's context carries a deadline.
-		done := make(chan struct{})
+		// cancellation. A watcher goroutine closes the conn on ctx.Done() to unblock
+		// an IN-FLIGHT handshake. It is made mutually exclusive with the success
+		// handoff by mu+handshakeDone: the mainline marks the handshake complete
+		// (under mu) BEFORE close(watcherStopped), so once that flag is set the
+		// watcher can no longer close the conn. The guarantee is therefore precise —
+		// the watcher interrupts only a still-running handshake, never the conn
+		// returned to the caller. A cancel that races a just-completed handshake is
+		// handled explicitly below: we return ctx.Err() rather than a live-but-closed
+		// conn (never success + a closed conn). SetDeadline (inside connectHandshake)
+		// still gives clean deadline errors when the caller's context has a deadline.
+		var mu sync.Mutex
+		handshakeDone := false
+		watcherStopped := make(chan struct{})
 		go func() {
 			select {
 			case <-ctx.Done():
-				// #nosec G104 -- best-effort interrupt of the stalled handshake; the dial fails below.
-				conn.Close() //nolint:errcheck,gosec // unblock the handshake on cancellation
-			case <-done:
+				mu.Lock()
+				if !handshakeDone {
+					// #nosec G104 -- best-effort interrupt of the in-flight handshake; the dial fails below.
+					conn.Close() //nolint:errcheck,gosec // unblock the in-flight handshake on cancellation
+				}
+				mu.Unlock()
+			case <-watcherStopped:
 			}
 		}()
 
 		br, handshakeErr := connectHandshake(ctx, conn, addr)
-		close(done)
+
+		mu.Lock()
+		handshakeDone = true
+		mu.Unlock()
+		close(watcherStopped)
+
 		if handshakeErr != nil {
 			// #nosec G104 -- best-effort cleanup; the conn is discarded on this error path (handshake failed or ctx canceled).
 			conn.Close() //nolint:errcheck,gosec // discard the conn on handshake failure
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("httpx: proxy CONNECT canceled: %w", ctx.Err())
+			}
 			return nil, handshakeErr
+		}
+
+		// Handshake succeeded. If ctx was canceled (possibly after the watcher
+		// already closed conn in the tiny success-vs-cancel window), return the
+		// cancellation error rather than handing back a maybe-closed conn.
+		if ctx.Err() != nil {
+			// #nosec G104 -- best-effort cleanup; the conn is discarded on this cancel-after-success path.
+			conn.Close() //nolint:errcheck,gosec // discard the conn: cancel raced a successful handshake
+			return nil, fmt.Errorf("httpx: proxy CONNECT canceled after handshake: %w", ctx.Err())
 		}
 
 		// Preserve any bytes the proxy pipelined past the CONNECT reply so the
