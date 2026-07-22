@@ -283,7 +283,7 @@ Results are saved to `test/.results/` with one subdirectory per test:
 
 ## Expected Results
 
-All 27 tests should pass. Order is non-deterministic and durations vary by machine (live crawl tests take the longest). The sample below is a default `--group all` run (19 offline + 8 live targets); the config-only `grpc-server` target runs additionally only when `TARGETS_SETUP` is configured.
+All 28 tests should pass. Order is non-deterministic and durations vary by machine (live crawl tests take the longest). The sample below is a default `--group all` run (19 offline + 9 live targets); the config-only `grpc-server` target runs additionally only when `TARGETS_SETUP` is configured.
 
 ```text
   TARGET                      STATUS    ENDPOINTS   EXPECTED   DURATION
@@ -317,7 +317,7 @@ All 27 tests should pass. Order is non-deterministic and durations vary by machi
   soap-service                PASS      3           3          51s
   spec-edge                   PASS      -           -          0s
 
-  Total: 27 passed, 0 failed, 0 skipped
+  Total: 28 passed, 0 failed, 0 skipped
 ```
 
 Some tests emit warnings (`[WARN]`) for soft behavioral checks. These are informational and do not cause failures.
