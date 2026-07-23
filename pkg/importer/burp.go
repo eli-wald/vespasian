@@ -45,7 +45,7 @@ type BurpImporter struct{}
 
 type burpItems struct {
 	XMLName xml.Name   `xml:"items"`
-	Items   []burpItem `xml:"item"`
+	Items   []burpItem `xml:"entry"`
 }
 
 type burpItem struct {
