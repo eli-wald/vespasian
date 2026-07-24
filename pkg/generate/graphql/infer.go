@@ -233,7 +233,7 @@ func inferSDL(endpoints []classify.ClassifiedRequest) ([]byte, error) { //nolint
 	unifyStructuralFieldTypes(syntheticTypes)
 
 	// Emit operation types in canonical order
-	for _, opType := range []string{"query", "mutation", "subscription"} {
+	for _, opType := range []string{"query"} {
 		groupOps, ok := grouped[opType]
 		if !ok {
 			continue
