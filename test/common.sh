@@ -27,3 +27,4 @@ log_info()   { echo -e "${CYAN}[INFO]${NC} $1"; }
 log_ok()     { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn()   { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_fail()   { echo -e "${RED}[FAIL]${NC} $1"; }
+# harness: should-skip — skip-live-tests label gates the test job (LAB-4773)
